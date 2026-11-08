@@ -1,0 +1,6 @@
+# JVM tests run on H2 in memory (the H2 driver is test-scoped).
+spring:
+  datasource:
+    url: jdbc:h2:mem:warehouse-test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;DATABASE_TO_LOWER=TRUE
+    username: sa
+    password: ""

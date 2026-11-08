@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1.7
+# JVM fallback image (no GraalVM needed):
+#   docker build -f Dockerfile.jvm -t warehouse-service:jvm .
+FROM eclipse-temurin:25-jdk AS build
+WORKDIR /workspace
+COPY .mvn .mvn
+COPY mvnw pom.xml ./
+COPY config config
+COPY src src
+RUN --mount=type=cache,target=/root/.m2 ./mvnw -B -Pfast-verify -DskipTests package \
+    && cp target/warehouse-service-*.jar /workspace/app.jar
+
+# Temurin JRE on Ubuntu keeps bash for the Compose /dev/tcp healthcheck.
+FROM eclipse-temurin:25-jre
+RUN groupadd --system --gid 10001 warehouse \
+    && useradd --system --uid 10001 --gid warehouse --no-create-home --shell /usr/sbin/nologin warehouse
+WORKDIR /app
+COPY --from=build --chown=warehouse:warehouse /workspace/app.jar /app/app.jar
+USER 10001
+EXPOSE 4003
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=70", "-XX:+UseSerialGC", "-jar", "/app/app.jar"]

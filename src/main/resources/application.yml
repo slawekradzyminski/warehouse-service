@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: warehouse-service
+  # PostgreSQL by default; SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD override it.
+  datasource:
+    url: jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse
+    username: postgres
+    password: postgres
+    hikari:
+      # Small footprint: the backend's Postgres is shared and memory-capped.
+      maximum-pool-size: 3
+      minimum-idle: 1
+      idle-timeout: 120000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: warehouse
+  flyway:
+    enabled: true
+    schemas: warehouse
+    default-schema: warehouse
+    create-schemas: true
+  jmx:
+    enabled: false
+  main:
+    banner-mode: "off"
+
+server:
+  port: 4003
+  tomcat:
+    threads:
+      max: 20
+      min-spare: 2
+    accept-count: 50
+    max-connections: 200
+  error:
+    include-message: never
+    include-binding-errors: never
+    include-stacktrace: never
+
+backend:
+  base-url: ${BACKEND_BASE_URL:http://localhost:4001}
+  connect-timeout: 2s
+  read-timeout: 10s
+
+warehouse:
+  service-token: ${WAREHOUSE_SERVICE_TOKEN:local-warehouse-token}
+  # Demo suppliers; enabled by the local and demo profiles.
+  seed-demo-data: false
+
+security:
+  jwt:
+    token:
+      secret-key: ${JWT_SECRET_KEY:local-development-jwt-key-change-me}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: ${MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE:health,prometheus}
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+
+logging:
+  level:
+    root: INFO

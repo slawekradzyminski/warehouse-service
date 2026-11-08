@@ -1,0 +1,14 @@
+# Postgres schema "warehouse" in the shared database; backend in the Compose network.
+# SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD override the defaults below.
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/testdb?currentSchema=warehouse
+    username: postgres
+    password: postgres
+
+backend:
+  base-url: ${BACKEND_BASE_URL:http://backend:4001}
+
+warehouse:
+  # Required: the backend disables its internal API when the token is unset.
+  service-token: ${WAREHOUSE_SERVICE_TOKEN}
