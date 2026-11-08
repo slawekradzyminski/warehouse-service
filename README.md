@@ -59,13 +59,13 @@ unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
 ## Run
 
 Requires Java 25 (Maven comes from the wrapper). The service is
-PostgreSQL-only at runtime; H2 is used by the JVM tests and by an optional
-JVM-only quick start.
+PostgreSQL-only in every profile; H2 is a test-scope dependency for the fast
+JVM unit tests only.
 
 ```bash
-# JVM quick start on H2 in memory (the "local" Maven profile adds the H2 driver);
+# Next to the backend's local profile (same localhost:5432/testdb, schema "warehouse"),
 # backend at http://localhost:4001, demo suppliers seeded
-./mvnw -Plocal spring-boot:run -Dspring-boot.run.profiles=local
+./mvnw spring-boot:run -Dspring-boot.run.profiles=local
 
 # Against PostgreSQL (schema "warehouse" is created by Flyway)
 SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse' ./mvnw spring-boot:run
@@ -76,7 +76,7 @@ Profiles:
 | Profile | Database | Backend | Notes |
 | --- | --- | --- | --- |
 | (none) | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` | `http://localhost:4001` | token `local-warehouse-token` |
-| `local` | H2 in memory (JVM only, needs `-Plocal`) | `http://localhost:4001` | token `local-warehouse-token`, seeds demo suppliers |
+| `local` | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` (user/password `postgres`) | `http://localhost:4001` | token `local-warehouse-token`, seeds demo suppliers |
 | `docker` | Postgres `jdbc:postgresql://postgres:5432/testdb?currentSchema=warehouse` | `http://backend:4001` | `WAREHOUSE_SERVICE_TOKEN` required |
 | `demo` | – | – | combine as `docker,demo` to seed the demo suppliers |
 

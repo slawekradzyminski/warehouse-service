@@ -1,11 +1,12 @@
-# JVM-only quick start on H2 in memory; needs the "local" Maven profile for the H2 driver:
-#   ./mvnw -Plocal spring-boot:run -Dspring-boot.run.profiles=local
-# The native image is PostgreSQL-only and cannot use this profile.
+# Local run next to the backend's local profile: the same PostgreSQL database
+# (localhost:5432/testdb, schema "warehouse"), with demo suppliers seeded:
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+# Override with SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD.
 spring:
   datasource:
-    url: jdbc:h2:mem:warehouse;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;DATABASE_TO_LOWER=TRUE
-    username: sa
-    password: ""
+    url: jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse
+    username: postgres
+    password: postgres
 
 backend:
   base-url: ${BACKEND_BASE_URL:http://localhost:4001}

@@ -273,17 +273,6 @@
 
     <profiles>
         <profile>
-            <!-- JVM-only local run on H2: ./mvnw -Plocal spring-boot:run -Dspring-boot.run.profiles=local -->
-            <id>local</id>
-            <dependencies>
-                <dependency>
-                    <groupId>com.h2database</groupId>
-                    <artifactId>h2</artifactId>
-                    <scope>runtime</scope>
-                </dependency>
-            </dependencies>
-        </profile>
-        <profile>
             <id>fast-verify</id>
             <properties>
                 <skip.pmd>true</skip.pmd>

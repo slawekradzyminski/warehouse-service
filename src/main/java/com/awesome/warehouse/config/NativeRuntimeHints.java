@@ -29,7 +29,7 @@ import java.util.List;
  *       ({@code Classes.newInstance("io.jsonwebtoken.impl...")}); exactly those
  *       classes (and the Jackson (de)serializers found through ServiceLoader)
  *       are registered for reflective construction.</li>
- *   <li>Flyway migrations, the Postgres driver and H2 are covered by Spring Boot's
+ *   <li>Flyway migrations and the Postgres driver are covered by Spring Boot's
  *       hints and the GraalVM reachability-metadata repository
  *       ({@code add-reachability-metadata} in the {@code native} profile).</li>
  * </ul>
