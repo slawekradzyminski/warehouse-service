@@ -32,7 +32,7 @@
         <mockito.version>5.24.0</mockito.version>
         <postgresql.version>42.7.14</postgresql.version>
         <springdoc.version>3.2.0</springdoc.version>
-        <pitest.version>1.30.1</pitest.version>
+        <pitest.version>1.30.2</pitest.version>
         <pitest.junit5.version>1.2.3</pitest.junit5.version>
         <native.xmx>10g</native.xmx>
         <native.parallelism>8</native.parallelism>
