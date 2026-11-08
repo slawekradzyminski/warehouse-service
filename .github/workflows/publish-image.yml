@@ -1,0 +1,250 @@
+name: Publish container image
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Prerelease image version matching the Maven snapshot line (for example, 1.0.1-rc.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v6.2.0
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Validate source and image version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          actual="$(./mvnw --batch-mode -Dstyle.color=never help:evaluate -Dexpression=project.version -q -DforceStdout)"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "Publishing commit $GITHUB_SHA is not contained in origin/master" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Release tag must use vMAJOR.MINOR.PATCH: $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$actual" == *-SNAPSHOT || "$actual" != "$version" ]]; then
+              echo "Tag $GITHUB_REF_NAME requires exact non-snapshot Maven version $version; found $actual" >&2
+              exit 1
+            fi
+          else
+            version="$REQUESTED_VERSION"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z][0-9A-Za-z.-]*$ ]]; then
+              echo "Manual version must be a semantic prerelease such as 1.0.1-rc.1: $version" >&2
+              exit 1
+            fi
+            release_line="${version%%-*}"
+            if [[ "$actual" != "${release_line}-SNAPSHOT" ]]; then
+              echo "Candidate $version requires Maven version ${release_line}-SNAPSHOT; found $actual" >&2
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify application
+        run: ./mvnw --batch-mode verify
+
+      - name: Build native verification container
+        run: docker build --tag warehouse-service:verification .
+
+      - name: Smoke test native container against Postgres
+        run: scripts/native-smoke.sh warehouse-service:verification
+
+  # native-image cannot cross-compile and is impractically slow under QEMU, so each platform is built
+  # on a runner of its own architecture, pushed by digest, and merged into one manifest list below.
+  build:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Prepare platform name
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require Docker Hub credentials
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets are required" >&2
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image labels
+        id: metadata
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+            slawekradzyminski/warehouse-service
+
+      - name: Build and push native image by digest
+        id: build
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          outputs: type=image,"name=ghcr.io/${{ github.repository }},slawekradzyminski/warehouse-service",push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=native-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=native-${{ env.PLATFORM_PAIR }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Export platform digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload platform digest
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download platform digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+            slawekradzyminski/warehouse-service
+          tags: |
+            type=raw,value=${{ needs.verify.outputs.version }}
+            type=sha,prefix=sha-
+          flavor: |
+            latest=false
+
+      - name: Create and push multi-platform manifest lists
+        id: manifest
+        shell: bash
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          for image in "ghcr.io/${{ github.repository }}" slawekradzyminski/warehouse-service; do
+            tags=()
+            while IFS= read -r tag; do tags+=(--tag "$tag"); done < <(
+              jq -r --arg image "$image" '.tags[] | select(startswith($image + ":"))' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+            sources=()
+            for digest in *; do sources+=("${image}@sha256:${digest}"); done
+            docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+          done
+          digest="$(docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:${VERSION}" \
+            --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Report manifest digest
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Published warehouse-service image
+
+          - Version: `${{ needs.verify.outputs.version }}`
+          - Digest: `${{ steps.manifest.outputs.digest }}`
+          - Image: GraalVM native executable (JVM fallback: `Dockerfile.jvm`, not published)
+          - Platforms: `linux/amd64`, `linux/arm64` (built natively per architecture)
+          - Registries: `ghcr.io/${{ github.repository }}`, `slawekradzyminski/warehouse-service`
+          - Tags: version and commit SHA
+          - Supply chain: SBOM and provenance enabled
+          EOF

@@ -71,3 +71,7 @@ in-memory `FakeBackend`, which implements the contract's internal-API rules.
 - Keep README.md (run, env vars, profiles) in sync with `application*.yml`.
 - Every controller endpoint needs `@Operation` (summary and description) and
   `@ApiResponse` entries; `OpenApiDocumentationTest` enforces it.
+
+# Native smoke test
+
+- `docker build -t warehouse-service:native . && scripts/native-smoke.sh warehouse-service:native` boots the native binary against a real Postgres (under a 160 MiB limit) and checks migrations, demo seeding, JWT validation, a JPA write, health, metrics and OpenAPI. Run it after dependency bumps and entity changes: JVM tests cannot see missing native metadata or lazy-proxy limits. CI runs it on every push and pull request.
