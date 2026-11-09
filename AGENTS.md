@@ -51,7 +51,7 @@ in-memory `FakeBackend`, which implements the contract's internal-API rules.
 
 # Mutation-testing workflow
 
-- Layer 1 (PITest): run the profile above after normal verification when you
+- PITest: run the profile above after normal verification when you
   change the shipment state machine, returns, refunds, purchasing receipts, the
   JWT validator or filter, or the backend client error mapping. Narrow it for
   small changes, for example
@@ -60,10 +60,6 @@ in-memory `FakeBackend`, which implements the contract's internal-API rules.
   For each meaningful survivor add a test that passes on the original and fails
   on the mutant. Classify equivalent mutants explicitly in the handoff. Keep
   the run advisory; do not use the aggregate score as a gate.
-- Layer 2 (semantic mutants): for changed high-risk behaviour, write one to
-  three requirement-driven mutants (see the lab note in README.md), apply them
-  only in a disposable copy, and report killed, survived, invalid and
-  equivalent candidates separately from the PITest score.
 
 # Change discipline
 

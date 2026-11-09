@@ -154,20 +154,7 @@ for the 64 MB heap cap plus native and thread memory.
 
 ## Mutation testing
 
-- Layer 1: `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage`
+- PITest: `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage`
   (scope: `Carrier`, `ShipmentService`, `ReturnService`, `RefundCalculator`,
   `PurchasingService`, `JwtTokenValidator`, `JwtTokenFilter`,
   `RestBackendClient`, `BackendErrorMapper`). Advisory, not a gate.
-- Layer 2: semantic mutants, see the lab note below.
-
-### Semantic mutation lab note
-
-Ported from the localstack `experiments/llm-mutation` corpus. Customer
-cancellation after picking now belongs to the backend's `fulfilment_state`
-rules and is not ported.
-
-| Id | Violated requirement | Mutation | Observable difference | Killing tests |
-| --- | --- | --- | --- | --- |
-| `refund-ignores-coupon` | Refund = Σ(unit price × quantity) × (order total ÷ order subtotal), so coupon discounts are returned proportionally | `ReturnService.estimatedRefund` returns `itemsValue.setScale(2, HALF_UP)` instead of calling `RefundCalculator.proportionalRefund(itemsValue, total, subtotal)` | A 10% coupon order (subtotal 140.00, total 126.00) returning 120.00 of goods refunds 120.00 instead of 108.00 | `ReturnFlowTest.returnOfADiscountedOrderRestocksResellableItemsAndRefundsProportionally`, `ReturnServiceTest.createSnapshotsOrderTotalsNamesAndPrices`, `ReturnServiceTest.refundPaysTheProportionalAmountAndNotifies` |
-
-Last run (disposable copy): killed by the three tests above.
