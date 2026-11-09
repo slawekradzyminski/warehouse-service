@@ -35,23 +35,26 @@ public class SpringDocProxyConfig {
         if (blank(hostWithPort)) {
             return serverBaseUrl;
         }
+        // The port the browser used (in the host) wins over X-Forwarded-Port: the local
+        // gateway publishes 8081 but sends its container port 80 as X-Forwarded-Port.
         String host = hostWithPort;
-        String port = firstHeader(request, "X-Forwarded-Port");
+        String port = null;
         if (hostWithPort.startsWith("[")) {
             int closing = hostWithPort.indexOf(']');
             if (closing > -1) {
                 host = hostWithPort.substring(0, closing + 1);
                 int separator = hostWithPort.indexOf(':', closing);
-                if (blank(port) && separator > -1 && separator + 1 < hostWithPort.length()) {
+                if (separator > -1 && separator + 1 < hostWithPort.length()) {
                     port = hostWithPort.substring(separator + 1);
                 }
             }
         } else if (hostWithPort.contains(":")) {
             String[] parts = hostWithPort.split(":", 2);
             host = parts[0];
-            if (blank(port)) {
-                port = parts[1];
-            }
+            port = parts[1];
+        }
+        if (blank(port)) {
+            port = firstHeader(request, "X-Forwarded-Port");
         }
         if (blank(port) && request.getURI().getPort() > 0) {
             port = Integer.toString(request.getURI().getPort());

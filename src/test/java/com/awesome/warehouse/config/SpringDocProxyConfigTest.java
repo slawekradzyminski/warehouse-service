@@ -19,9 +19,9 @@ class SpringDocProxyConfigTest {
     }
 
     @Test
-    void localGatewayKeepsItsPort() {
+    void localGatewayKeepsThePublishedPortAlthoughItForwardsItsContainerPort() {
         assertThat(url("http://warehouse-service:4003/v3/api-docs",
-                "localhost:8081", "localhost:8081", null, "http")).isEqualTo("http://localhost:8081");
+                "localhost:8081", "localhost:8081", "80", "http")).isEqualTo("http://localhost:8081");
     }
 
     @Test
