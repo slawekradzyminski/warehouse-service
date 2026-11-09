@@ -96,6 +96,10 @@ echo "ready after $(( $(date +%s) - started ))s"
 
 expect "prometheus metrics" "$(status_of "$base/actuator/prometheus")" 200
 curl -sf "$base/v3/api-docs" | grep -q '"/api/v1/warehouse/queue"' && echo "PASS OpenAPI lists warehouse paths"
+curl -sf -H 'Host: awesome.byst.re' -H 'X-Forwarded-Host: awesome.byst.re' -H 'X-Forwarded-Proto: https' \
+  -H 'X-Forwarded-Port: 443' "$base/v3/api-docs" | grep -q '"url":"https://awesome.byst.re"' \
+  && echo "PASS OpenAPI server URL follows the gateway's forwarded headers" \
+  || { echo "FAIL OpenAPI server URL ignores X-Forwarded-Proto" >&2; exit 1; }
 expect "missing token" "$(status_of "$base/api/v1/admin/suppliers")" 401
 expect "client role forbidden" "$(status_of -H "Authorization: Bearer $(token ROLE_CLIENT)" "$base/api/v1/admin/suppliers")" 403
 suppliers=$(curl -sf -H "Authorization: Bearer $(token ROLE_ADMIN)" "$base/api/v1/admin/suppliers")
