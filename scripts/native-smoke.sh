@@ -39,7 +39,8 @@ KID="native-smoke-key"
 mkdir -p "$WORK/www/internal/v1"
 printf '{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"%s","n":"%s","e":"%s"}]}' \
   "$KID" "$MODULUS" "$EXPONENT" > "$WORK/www/internal/v1/jwks.json"
-chmod -R a+rX "$WORK/www"
+printf '.json:application/json\n' > "$WORK/httpd.conf"
+chmod -R a+rX "$WORK/www" "$WORK/httpd.conf"
 
 token() {
   local now header payload signature
@@ -67,7 +68,7 @@ expect() {
 
 docker network create "$NETWORK" >/dev/null
 docker run -d --name "$RUN_ID-jwks" --network "$NETWORK" -v "$WORK/www:/www:ro" \
-  "$BUSYBOX_IMAGE" httpd -f -p 4001 -h /www >/dev/null
+  -v "$WORK/httpd.conf:/etc/httpd.conf:ro" "$BUSYBOX_IMAGE" httpd -f -p 4001 -h /www -c /etc/httpd.conf >/dev/null
 docker run -d --name "$RUN_ID-db" --network "$NETWORK" \
   -e POSTGRES_DB=warehouse -e POSTGRES_USER=warehouse -e POSTGRES_PASSWORD=warehouse \
   "$POSTGRES_IMAGE" >/dev/null
