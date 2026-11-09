@@ -21,6 +21,8 @@ public class RestBackendClient implements BackendClient {
 
     private static final ParameterizedTypeReference<PageDto<InternalOrderDto>> ORDER_PAGE =
             new ParameterizedTypeReference<>() {};
+    private static final ParameterizedTypeReference<List<InternalOrderDto>> ORDER_LIST =
+            new ParameterizedTypeReference<>() {};
     private static final ParameterizedTypeReference<List<InternalProductDto>> PRODUCT_LIST =
             new ParameterizedTypeReference<>() {};
 
@@ -55,6 +57,31 @@ public class RestBackendClient implements BackendClient {
                 .uri(uri -> uri.path("/internal/v1/orders")
                         .queryParam("status", "PAID")
                         .queryParam("fulfilment", "NONE")
+                        .queryParam("page", page)
+                        .queryParam("size", size)
+                        .build())
+                .retrieve()
+                .body(ORDER_PAGE));
+    }
+
+    @Override
+    public List<InternalOrderDto> getOrders(Collection<Long> ids) {
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        String joined = ids.stream().map(String::valueOf).collect(Collectors.joining(","));
+        return call(() -> restClient.get()
+                .uri(uri -> uri.path("/internal/v1/orders").queryParam("ids", joined).build())
+                .retrieve()
+                .body(ORDER_LIST));
+    }
+
+    @Override
+    public PageDto<InternalOrderDto> ordersAwaitingPick(int page, int size) {
+        return call(() -> restClient.get()
+                .uri(uri -> uri.path("/internal/v1/orders")
+                        .queryParam("status", "PAID")
+                        .queryParam("fulfilment", "AWAITING_PICK")
                         .queryParam("page", page)
                         .queryParam("size", size)
                         .build())
@@ -118,6 +145,24 @@ public class RestBackendClient implements BackendClient {
                 .body(request)
                 .retrieve()
                 .toBodilessEntity());
+    }
+
+    @Override
+    public InternalOrderDto refundOrder(long orderId, OrderRefundRequest request) {
+        return call(() -> restClient.post()
+                .uri("/internal/v1/orders/{id}/refunds", orderId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(request)
+                .retrieve()
+                .body(InternalOrderDto.class));
+    }
+
+    @Override
+    public JwkSet jwks() {
+        return call(() -> restClient.get()
+                .uri("/internal/v1/jwks.json")
+                .retrieve()
+                .body(JwkSet.class));
     }
 
     private static <T> T call(Supplier<T> request) {

@@ -89,6 +89,57 @@ class RestBackendClientContractTest {
     }
 
     @Test
+    void ordersAreReadInBatchesByCommaSeparatedIds() {
+        server.expect(requestTo(BASE + "/internal/v1/orders?ids=42,43"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header("X-Service-Token", TOKEN))
+                .andRespond(withSuccess("[" + ORDER_JSON + "]", MediaType.APPLICATION_JSON));
+
+        assertThat(client.getOrders(List.of(42L, 43L))).extracting(InternalOrderDto::id).containsExactly(42L);
+        assertThat(client.getOrders(List.of())).isEmpty();
+        server.verify();
+    }
+
+    @Test
+    void releasedOrdersAreTheAwaitingPickQueue() {
+        server.expect(requestTo(BASE + "/internal/v1/orders?status=PAID&fulfilment=AWAITING_PICK&page=0&size=100"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"content\":[" + ORDER_JSON + "],\"pageNumber\":0,\"pageSize\":100,"
+                        + "\"totalElements\":1,\"totalPages\":1}", MediaType.APPLICATION_JSON));
+
+        assertThat(client.ordersAwaitingPick(0, 100).getContent()).extracting(InternalOrderDto::id).containsExactly(42L);
+        server.verify();
+    }
+
+    @Test
+    void refundIsPostedWithItsRequestId() {
+        server.expect(requestTo(BASE + "/internal/v1/orders/42/refunds"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header("X-Service-Token", TOKEN))
+                .andExpect(content().json("""
+                        {"requestId":"00000000-0000-0000-0000-000000000007","amount":19.99,"reference":"Return #7"}""",
+                        org.springframework.test.json.JsonCompareMode.STRICT))
+                .andRespond(withSuccess(ORDER_JSON, MediaType.APPLICATION_JSON));
+
+        assertThat(client.refundOrder(42, new OrderRefundRequest(UUID.fromString("00000000-0000-0000-0000-000000000007"),
+                new java.math.BigDecimal("19.99"), "Return #7")).id()).isEqualTo(42L);
+        server.verify();
+    }
+
+    @Test
+    void jwksIsReadFromTheInternalApi() {
+        server.expect(requestTo(BASE + "/internal/v1/jwks.json"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header("X-Service-Token", TOKEN))
+                .andRespond(withSuccess("""
+                        {"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"k1","n":"AQAB","e":"AQAB"}]}""",
+                        MediaType.APPLICATION_JSON));
+
+        assertThat(client.jwks().keys()).containsExactly(new JwkSet.Jwk("RSA", "k1", "RS256", "sig", "AQAB", "AQAB"));
+        server.verify();
+    }
+
+    @Test
     void fulfilmentUpdateIsAPutWithTheState() {
         server.expect(requestTo(BASE + "/internal/v1/orders/42/fulfilment"))
                 .andExpect(method(HttpMethod.PUT))
@@ -166,13 +217,13 @@ class RestBackendClientContractTest {
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(header("X-Service-Token", TOKEN))
                 .andExpect(content().json("""
-                        {"username":"client","template":"ORDER_SHIPPED","subject":"Order #42 has shipped",
-                         "message":"Hi","properties":{"orderId":"42"}}""",
+                        {"requestId":"00000000-0000-0000-0000-000000000042","username":"client",
+                         "template":"ORDER_SHIPPED","properties":{"orderId":"42"}}""",
                         org.springframework.test.json.JsonCompareMode.STRICT))
                 .andRespond(withStatus(HttpStatus.ACCEPTED));
 
-        client.sendNotification(new NotificationRequest("client", NotificationTemplate.ORDER_SHIPPED,
-                "Order #42 has shipped", "Hi", Map.of("orderId", "42")));
+        client.sendNotification(new NotificationRequest(UUID.fromString("00000000-0000-0000-0000-000000000042"),
+                "client", NotificationTemplate.ORDER_SHIPPED, Map.of("orderId", "42")));
 
         server.verify();
     }

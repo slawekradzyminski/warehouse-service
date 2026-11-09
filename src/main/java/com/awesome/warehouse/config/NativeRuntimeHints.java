@@ -6,6 +6,8 @@ import com.awesome.warehouse.client.InternalProductDto;
 import com.awesome.warehouse.client.InventoryReceiptRequest;
 import com.awesome.warehouse.client.InventoryReceiptResponse;
 import com.awesome.warehouse.client.NotificationRequest;
+import com.awesome.warehouse.client.OrderRefundRequest;
+import com.awesome.warehouse.client.JwkSet;
 import com.awesome.warehouse.dto.ErrorDto;
 import com.awesome.warehouse.dto.order.PageDto;
 import org.springframework.aot.hint.MemberCategory;
@@ -43,6 +45,9 @@ import java.util.List;
     InventoryReceiptRequest.class,
     InventoryReceiptResponse.class,
     NotificationRequest.class,
+    OrderRefundRequest.class,
+    JwkSet.class,
+    JwkSet.Jwk.class,
     PageDto.class,
     ErrorDto.class
 })

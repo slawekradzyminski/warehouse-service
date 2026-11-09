@@ -10,6 +10,8 @@ import com.awesome.warehouse.client.InternalProductDto;
 import com.awesome.warehouse.client.InventoryReceiptRequest;
 import com.awesome.warehouse.client.InventoryReceiptResponse;
 import com.awesome.warehouse.client.NotificationRequest;
+import com.awesome.warehouse.client.JwkSet;
+import com.awesome.warehouse.client.OrderRefundRequest;
 import com.awesome.warehouse.client.ReceiptLine;
 import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.dto.order.OrderStatus;
@@ -49,8 +51,12 @@ public class FakeBackend implements BackendClient {
     private final Map<UUID, InventoryReceiptRequest> receipts = new ConcurrentHashMap<>();
     private final List<NotificationRequest> notifications = new CopyOnWriteArrayList<>();
     private final List<String> calls = new CopyOnWriteArrayList<>();
+    private final Map<UUID, OrderRefundRequest> refunds = new ConcurrentHashMap<>();
+    private final Map<Long, BigDecimal> refunded = new ConcurrentHashMap<>();
     private volatile boolean available = true;
     private volatile boolean refuseFulfilment;
+    private volatile boolean loseNextFulfilmentResponse;
+    private volatile boolean notificationsDown;
 
     public void reset() {
         orders.clear();
@@ -58,8 +64,30 @@ public class FakeBackend implements BackendClient {
         receipts.clear();
         notifications.clear();
         calls.clear();
+        refunds.clear();
+        refunded.clear();
         available = true;
         refuseFulfilment = false;
+        loseNextFulfilmentResponse = false;
+        notificationsDown = false;
+    }
+
+    /** The next PUT fulfilment is applied, but the caller gets 503 as if the response timed out. */
+    public void loseNextFulfilmentResponse() {
+        this.loseNextFulfilmentResponse = true;
+    }
+
+    /** Makes POST notifications answer 503 while every other call works. */
+    public void setNotificationsDown(boolean notificationsDown) {
+        this.notificationsDown = notificationsDown;
+    }
+
+    public BigDecimal refundedAmount(Long orderId) {
+        return refunded.getOrDefault(orderId, BigDecimal.ZERO);
+    }
+
+    public Collection<OrderRefundRequest> refunds() {
+        return List.copyOf(refunds.values());
     }
 
     /** Makes PUT fulfilment answer 409 while the order itself still looks releasable. */
@@ -144,13 +172,16 @@ public class FakeBackend implements BackendClient {
                 .filter(o -> o.status() == OrderStatus.PAID && o.fulfilmentState() == FulfilmentState.NONE)
                 .sorted(Comparator.comparing(InternalOrderDto::id))
                 .toList();
+        return page(queue, page, size);
+    }
+
+    private static PageDto<InternalOrderDto> page(List<InternalOrderDto> all, int page, int size) {
         PageDto<InternalOrderDto> dto = new PageDto<>();
-        List<InternalOrderDto> content = queue.stream().skip((long) page * size).limit(size).toList();
-        dto.setContent(content);
+        dto.setContent(all.stream().skip((long) page * size).limit(size).toList());
         dto.setPageNumber(page);
         dto.setPageSize(size);
-        dto.setTotalElements(queue.size());
-        dto.setTotalPages((queue.size() + size - 1) / size);
+        dto.setTotalElements(all.size());
+        dto.setTotalPages((all.size() + size - 1) / size);
         return dto;
     }
 
@@ -158,6 +189,9 @@ public class FakeBackend implements BackendClient {
     public synchronized InternalOrderDto updateFulfilment(long orderId, FulfilmentState state) {
         call("PUT fulfilment " + orderId + " " + state);
         InternalOrderDto order = getOrderQuietly(orderId);
+        if (!refuseFulfilment && order.fulfilmentState() == state) {
+            return order;
+        }
         boolean allowed = !refuseFulfilment && NEXT.get(order.fulfilmentState()) == state
                 && (state != FulfilmentState.AWAITING_PICK || order.status() == OrderStatus.PAID);
         if (!allowed) {
@@ -170,7 +204,56 @@ public class FakeBackend implements BackendClient {
         };
         InternalOrderDto updated = with(order, status, state);
         orders.put(orderId, updated);
+        if (loseNextFulfilmentResponse) {
+            loseNextFulfilmentResponse = false;
+            throw BackendErrorMapper.unavailable(new IllegalStateException("fake backend response lost"));
+        }
         return updated;
+    }
+
+    @Override
+    public List<InternalOrderDto> getOrders(Collection<Long> orderIds) {
+        call("GET orders " + orderIds);
+        return orderIds.stream().map(orders::get).filter(java.util.Objects::nonNull)
+                .sorted(Comparator.comparing(InternalOrderDto::id)).toList();
+    }
+
+    @Override
+    public PageDto<InternalOrderDto> ordersAwaitingPick(int page, int size) {
+        call("GET awaiting pick");
+        return page(orders.values().stream()
+                .filter(o -> o.status() == OrderStatus.PAID && o.fulfilmentState() == FulfilmentState.AWAITING_PICK)
+                .sorted(Comparator.comparing(InternalOrderDto::id))
+                .toList(), page, size);
+    }
+
+    @Override
+    public synchronized InternalOrderDto refundOrder(long orderId, OrderRefundRequest request) {
+        call("POST refund " + orderId);
+        InternalOrderDto order = getOrderQuietly(orderId);
+        OrderRefundRequest previous = refunds.get(request.requestId());
+        if (previous != null) {
+            if (previous.amount().compareTo(request.amount()) != 0) {
+                throw new CustomException("requestId already used with a different refund", HttpStatus.CONFLICT);
+            }
+            return order;
+        }
+        if (order.status() != OrderStatus.DELIVERED) {
+            throw new CustomException("Only delivered orders can be refunded", HttpStatus.CONFLICT);
+        }
+        BigDecimal total = refundedAmount(orderId).add(request.amount());
+        if (total.compareTo(order.totalAmount()) > 0) {
+            throw new CustomException("Refund exceeds the refundable amount", HttpStatus.CONFLICT);
+        }
+        refunds.put(request.requestId(), request);
+        refunded.put(orderId, total);
+        return order;
+    }
+
+    @Override
+    public JwkSet jwks() {
+        call("GET jwks");
+        return TestTokens.jwks();
     }
 
     @Override
@@ -219,7 +302,12 @@ public class FakeBackend implements BackendClient {
     @Override
     public void sendNotification(NotificationRequest request) {
         call("POST notification " + request.template());
-        notifications.add(request);
+        if (notificationsDown) {
+            throw BackendErrorMapper.unavailable(new IllegalStateException("fake notifications down"));
+        }
+        if (notifications.stream().noneMatch(sent -> sent.requestId().equals(request.requestId()))) {
+            notifications.add(request);
+        }
     }
 
     private void call(String description) {

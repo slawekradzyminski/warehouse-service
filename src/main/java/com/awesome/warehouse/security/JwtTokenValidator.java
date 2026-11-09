@@ -5,26 +5,22 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.stereotype.Component;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * Validates the backend's HMAC access tokens. The signing key is derived from
- * {@code security.jwt.token.secret-key} exactly like the backend's
- * {@code JwtTokenProvider.init()}; roles come from the {@code auth} claim,
- * which the backend writes as {@code [{"authority": "ROLE_..."}]}. There is no
- * user lookup: the token is the source of truth.
+ * Validates the backend's RS256 access tokens with the public keys the backend publishes
+ * (see {@link BackendKeyLocator}); warehouse-service holds no signing secret. Roles come from
+ * the {@code auth} claim, which the backend writes as {@code [{"authority": "ROLE_..."}]}.
+ * There is no user lookup: the token is the source of truth.
  */
 @Component
 public class JwtTokenValidator {
@@ -32,35 +28,11 @@ public class JwtTokenValidator {
     static final String INVALID_TOKEN = "Invalid or expired token";
     private static final String BEARER_PREFIX = "Bearer ";
     private static final String ROLE_PREFIX = "ROLE_";
-    private static final int MINIMUM_SECURE_KEY_BYTES = 32;
-    private static final Set<String> INSECURE_DEVELOPMENT_KEYS = Set.of(
-            "secret-key",
-            "test-key",
-            "local-development-jwt-key-change-me"
-    );
 
     private final JwtParser parser;
 
-    public JwtTokenValidator(
-            @Value("${security.jwt.token.secret-key}") String secretKey,
-            @Value("${security.jwt.token.require-secure-key:false}") boolean requireSecureKey) {
-        this.parser = Jwts.parser().verifyWith(Keys.hmacShaKeyFor(keyBytes(secretKey, requireSecureKey))).build();
-    }
-
-    static byte[] keyBytes(String secretKey, boolean requireSecureKey) {
-        if (secretKey == null || secretKey.isBlank()) {
-            throw new IllegalStateException("JWT signing key must be configured");
-        }
-        byte[] keyBytes = secretKey.getBytes(StandardCharsets.UTF_8);
-        if (requireSecureKey
-                && (keyBytes.length < MINIMUM_SECURE_KEY_BYTES || INSECURE_DEVELOPMENT_KEYS.contains(secretKey))) {
-            throw new IllegalStateException("JWT signing key must contain at least 32 random bytes");
-        }
-        if (keyBytes.length < MINIMUM_SECURE_KEY_BYTES) {
-            int repetitions = Math.ceilDiv(MINIMUM_SECURE_KEY_BYTES, keyBytes.length);
-            keyBytes = secretKey.repeat(repetitions).getBytes(StandardCharsets.UTF_8);
-        }
-        return keyBytes;
+    public JwtTokenValidator(BackendKeyLocator keyLocator) {
+        this.parser = Jwts.parser().keyLocator(keyLocator).build();
     }
 
     /** Returns the raw token from an {@code Authorization: Bearer ...} header, or null. */

@@ -47,6 +47,8 @@ public abstract class AbstractFlowTest {
     @Autowired private PurchaseReceiptRepository receiptRepository;
     @Autowired private PurchaseOrderRepository purchaseOrderRepository;
     @Autowired private SupplierRepository supplierRepository;
+    @Autowired private com.awesome.warehouse.repository.notification.NotificationOutboxRepository outbox;
+    @Autowired private com.awesome.warehouse.repository.returns.OrderLockRepository orderLocks;
 
     @BeforeEach
     void resetBackend() {
@@ -60,6 +62,8 @@ public abstract class AbstractFlowTest {
         supplierRepository.deleteAll();
         returnRepository.deleteAll();
         shipmentRepository.deleteAll();
+        outbox.deleteAll();
+        orderLocks.deleteAll();
     }
 
     protected Response getJson(String path, String token) {

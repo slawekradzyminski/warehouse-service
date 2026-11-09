@@ -17,6 +17,12 @@ public interface BackendClient {
     /** PAID orders with fulfilment state NONE, oldest first. */
     PageDto<InternalOrderDto> fulfilmentQueue(int page, int size);
 
+    /** Snapshots of the given orders in any status (unknown ids are skipped); at most 100 ids. */
+    List<InternalOrderDto> getOrders(Collection<Long> ids);
+
+    /** PAID orders already released to the warehouse (fulfilment state AWAITING_PICK), oldest first. */
+    PageDto<InternalOrderDto> ordersAwaitingPick(int page, int size);
+
     InternalOrderDto updateFulfilment(long orderId, FulfilmentState state);
 
     InternalOrderDto warehouseCancel(long orderId);
@@ -28,4 +34,10 @@ public interface BackendClient {
     InventoryReceiptResponse receiveInventory(InventoryReceiptRequest request);
 
     void sendNotification(NotificationRequest request);
+
+    /** Books a refund on a delivered order; idempotent per requestId. */
+    InternalOrderDto refundOrder(long orderId, OrderRefundRequest request);
+
+    /** The backend's access-token verification keys. */
+    JwkSet jwks();
 }
