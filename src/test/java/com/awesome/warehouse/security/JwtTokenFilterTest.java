@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class JwtTokenFilterTest {
 
-    private final JwtTokenFilter filter = new JwtTokenFilter(new JwtTokenValidator(TestTokens.SECRET, false));
+    private final JwtTokenFilter filter = new JwtTokenFilter(TestTokens.validator());
 
     @AfterEach
     void clear() {
@@ -50,7 +50,7 @@ class JwtTokenFilterTest {
     @Test
     void invalidTokenIsRejectedWithAnErrorBodyAndStopsTheChain() throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest();
-        request.addHeader("Authorization", "Bearer " + TestTokens.token(TestTokens.SECRET, "alice", -5_000L, "ROLE_ADMIN"));
+        request.addHeader("Authorization", "Bearer " + TestTokens.token(TestTokens.KEYS.getPrivate(), TestTokens.KID, "alice", -5_000L, "ROLE_ADMIN"));
         MockFilterChain chain = new MockFilterChain();
         MockHttpServletResponse response = new MockHttpServletResponse();
 
@@ -66,7 +66,7 @@ class JwtTokenFilterTest {
     @Test
     void invalidTokenClearsAnyAuthenticationLeftOnTheThread() throws Exception {
         SecurityContextHolder.getContext().setAuthentication(
-                new JwtTokenValidator(TestTokens.SECRET, false).authenticate(TestTokens.token("stale", "ROLE_ADMIN")));
+                TestTokens.validator().authenticate(TestTokens.token("stale", "ROLE_ADMIN")));
         MockHttpServletRequest request = new MockHttpServletRequest();
         request.addHeader("Authorization", "Bearer forged.token.value");
 

@@ -18,7 +18,10 @@ import com.awesome.warehouse.repository.fulfilment.ShipmentRepository;
 import com.awesome.warehouse.service.notification.CustomerMessages;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.ApplicationEventPublisher;
+import com.awesome.warehouse.service.notification.NotificationOutbox;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
@@ -29,6 +32,7 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -48,10 +52,12 @@ public class ShipmentService {
 
     /** lastActor recorded when the shipment follows a cancellation made on the backend. */
     static final String SYSTEM_ACTOR = "system";
+    static final int RECONCILE_BATCH = 100;
+    static final java.time.Duration ADOPT_AFTER = java.time.Duration.ofMinutes(2);
 
     private final ShipmentRepository shipmentRepository;
     private final BackendClient backendClient;
-    private final ApplicationEventPublisher eventPublisher;
+    private final NotificationOutbox notificationOutbox;
     private final Clock warehouseClock;
 
     public PageDto<OrderDto> queue(int page, int size) {
@@ -62,6 +68,12 @@ public class ShipmentService {
      * Releases a PAID order. The shipment row is written first so the unique
      * order constraint serialises concurrent releases; if the backend refuses
      * the AWAITING_PICK transition the row is removed again.
+     *
+     * <p>The backend accepts a repeated AWAITING_PICK, so a release whose
+     * response was lost is safe to retry: an order that is already AWAITING_PICK
+     * without a local shipment is adopted. When the backend call itself fails
+     * (503, including timeouts) the order is read again and the shipment is kept
+     * if the release did reach the backend.
      */
     @Transactional
     public ShipmentDto create(Long orderId, String actor) {
@@ -69,24 +81,101 @@ public class ShipmentService {
         if (order.status() != OrderStatus.PAID) {
             throw new CustomException("Only PAID orders can be released to the warehouse", HttpStatus.CONFLICT);
         }
-        if (order.fulfilmentState() != FulfilmentState.NONE || shipmentRepository.existsByOrderId(orderId)) {
+        boolean releasable = order.fulfilmentState() == FulfilmentState.NONE
+                || order.fulfilmentState() == FulfilmentState.AWAITING_PICK;
+        if (!releasable || shipmentRepository.existsByOrderId(orderId)) {
             throw new CustomException("Order already has a shipment", HttpStatus.CONFLICT);
         }
-        ShipmentEntity shipment = shipmentRepository.saveAndFlush(ShipmentEntity.builder()
+        ShipmentEntity shipment = shipmentRepository.saveAndFlush(newShipment(order, actor));
+        try {
+            backendClient.updateFulfilment(orderId, FulfilmentState.AWAITING_PICK);
+        } catch (CustomException e) {
+            if (e.getHttpStatus() == HttpStatus.SERVICE_UNAVAILABLE && releasedOnBackend(orderId)) {
+                log.warn("Release of order {} reached the backend although the call failed; keeping the shipment",
+                        orderId);
+                return toDto(shipment);
+            }
+            shipmentRepository.delete(shipment);
+            throw e;
+        }
+        return toDto(shipment);
+    }
+
+    private boolean releasedOnBackend(Long orderId) {
+        try {
+            return backendClient.getOrder(orderId).fulfilmentState() == FulfilmentState.AWAITING_PICK;
+        } catch (CustomException e) {
+            return false;
+        }
+    }
+
+    private static ShipmentEntity newShipment(InternalOrderDto order, String actor) {
+        return ShipmentEntity.builder()
                 .orderId(order.id())
                 .username(order.username())
                 .totalUnits(order.totalUnits())
                 .status(ShipmentStatus.AWAITING_PICK)
                 .createdBy(actor)
                 .lastActor(actor)
-                .build());
-        try {
-            backendClient.updateFulfilment(orderId, FulfilmentState.AWAITING_PICK);
-        } catch (CustomException e) {
-            shipmentRepository.delete(shipment);
-            throw e;
+                .build();
+    }
+
+    /**
+     * Follows customer cancellations made on the backend (which does not call back):
+     * every AWAITING_PICK shipment whose order is now CANCELLED becomes CANCELLED.
+     *
+     * @return the number of shipments cancelled
+     */
+    @Transactional
+    public int reconcileCancellations() {
+        List<ShipmentEntity> awaiting = shipmentRepository.findByStatus(ShipmentStatus.AWAITING_PICK,
+                PageRequest.of(0, RECONCILE_BATCH, Sort.by("id"))).getContent();
+        if (awaiting.isEmpty()) {
+            return 0;
         }
-        return toDto(shipment);
+        Map<Long, InternalOrderDto> orders = new HashMap<>();
+        backendClient.getOrders(awaiting.stream().map(ShipmentEntity::getOrderId).toList())
+                .forEach(order -> orders.put(order.id(), order));
+        int cancelled = 0;
+        for (ShipmentEntity candidate : awaiting) {
+            InternalOrderDto order = orders.get(candidate.getOrderId());
+            if (order == null || order.fulfilmentState() != FulfilmentState.CANCELLED) {
+                continue;
+            }
+            ShipmentEntity shipment = lock(candidate.getId());
+            if (shipment.getStatus() == ShipmentStatus.AWAITING_PICK && markCancelledIfOrderCancelled(shipment, order)) {
+                log.info("Shipment {} cancelled because order {} was cancelled", shipment.getId(), order.id());
+                cancelled++;
+            }
+        }
+        return cancelled;
+    }
+
+    /**
+     * Creates the missing shipment for orders the backend reports as AWAITING_PICK
+     * although no shipment exists (a release whose local write was lost). Orders
+     * younger than {@link #ADOPT_AFTER} are left alone, because their release may
+     * still be in flight.
+     *
+     * @return the number of shipments created
+     */
+    public int adoptReleasedOrders() {
+        LocalDateTime cutoff = now().minus(ADOPT_AFTER);
+        int adopted = 0;
+        for (InternalOrderDto order : backendClient.ordersAwaitingPick(0, RECONCILE_BATCH).getContent()) {
+            if (order.updatedAt() == null || order.updatedAt().isAfter(cutoff)
+                    || shipmentRepository.existsByOrderId(order.id())) {
+                continue;
+            }
+            try {
+                shipmentRepository.saveAndFlush(newShipment(order, SYSTEM_ACTOR));
+                log.warn("Adopted order {}: it was released to the warehouse without a shipment", order.id());
+                adopted++;
+            } catch (DataIntegrityViolationException e) {
+                log.debug("Order {} got its shipment concurrently", order.id());
+            }
+        }
+        return adopted;
     }
 
     @Transactional(readOnly = true)
@@ -184,7 +273,7 @@ public class ShipmentService {
         shipment.setStatus(ShipmentStatus.SHIPPED);
         shipment.setShippedAt(now());
         ShipmentDto result = save(shipment, actor);
-        eventPublisher.publishEvent(CustomerMessages.shipped(shipment));
+        notificationOutbox.enqueue(CustomerMessages.shipped(shipment));
         return result;
     }
 
@@ -196,7 +285,7 @@ public class ShipmentService {
         shipment.setStatus(ShipmentStatus.DELIVERED);
         shipment.setDeliveredAt(now());
         ShipmentDto result = save(shipment, actor);
-        eventPublisher.publishEvent(CustomerMessages.delivered(shipment));
+        notificationOutbox.enqueue(CustomerMessages.delivered(shipment));
         return result;
     }
 
@@ -208,8 +297,12 @@ public class ShipmentService {
         try {
             backendClient.warehouseCancel(shipment.getOrderId());
         } catch (CustomException e) {
-            reconcileOnConflict(shipment, e);
-            throw e;
+            if (e.getHttpStatus() != HttpStatus.CONFLICT
+                    || backendClient.getOrder(shipment.getOrderId()).fulfilmentState() != FulfilmentState.CANCELLED) {
+                throw e;
+            }
+            // Already cancelled on the backend: a retried cancel whose first response was
+            // lost, or a customer cancellation. Either way the shipment ends CANCELLED.
         }
         shipment.setStatus(ShipmentStatus.CANCELLED);
         shipment.setCancelledAt(now());

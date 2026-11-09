@@ -50,11 +50,22 @@ warehouse:
   service-token: ${WAREHOUSE_SERVICE_TOKEN:local-warehouse-token}
   # Demo suppliers; enabled by the local and demo profiles.
   seed-demo-data: false
+  # Cancels shipments whose order was cancelled on the backend and adopts orders
+  # released without a shipment.
+  reconcile:
+    enabled: ${WAREHOUSE_RECONCILE_ENABLED:true}
+    interval: ${WAREHOUSE_RECONCILE_INTERVAL:PT1M}
+  # Retries customer notifications from the outbox that the backend did not accept.
+  notifications:
+    retry-enabled: ${WAREHOUSE_NOTIFICATIONS_RETRY_ENABLED:true}
+    retry-interval: ${WAREHOUSE_NOTIFICATIONS_RETRY_INTERVAL:PT30S}
 
 security:
   jwt:
-    token:
-      secret-key: ${JWT_SECRET_KEY:local-development-jwt-key-change-me}
+    # Access tokens are RS256-signed by the backend and verified with the keys it
+    # publishes at /internal/v1/jwks.json; an unknown key id refetches them at most
+    # this often.
+    jwks-refresh-interval: ${JWT_JWKS_REFRESH_INTERVAL:10s}
 
 management:
   endpoints:

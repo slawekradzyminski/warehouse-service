@@ -1,6 +1,8 @@
 package com.awesome.warehouse.security;
 
+import com.awesome.warehouse.client.JwkSet;
 import com.awesome.warehouse.controller.exception.CustomException;
+import com.awesome.warehouse.support.FakeBackend;
 import com.awesome.warehouse.support.TestTokens;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
@@ -9,7 +11,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 
-import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.interfaces.RSAPublicKey;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
@@ -19,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JwtTokenValidatorTest {
 
-    private final JwtTokenValidator validator = new JwtTokenValidator(TestTokens.SECRET, false);
+    private final JwtTokenValidator validator = TestTokens.validator();
 
     @Test
     void backendTokenBecomesAnAuthenticationWithItsRoles() {
@@ -44,12 +47,85 @@ class JwtTokenValidatorTest {
 
     @Test
     void expiredTokenIsRejected() {
-        assertInvalid(TestTokens.token(TestTokens.SECRET, "alice", -1_000L, "ROLE_ADMIN"));
+        assertInvalid(TestTokens.token(TestTokens.KEYS.getPrivate(), TestTokens.KID, "alice", -1_000L, "ROLE_ADMIN"));
     }
 
     @Test
-    void tokenSignedWithAnotherKeyIsRejected() {
-        assertInvalid(TestTokens.token("another-secret", "alice", 60_000L, "ROLE_ADMIN"));
+    void tokenSignedWithAnotherKeyUnderTheSameKidIsRejected() {
+        KeyPair other = TestTokens.generate();
+
+        assertInvalid(TestTokens.token(other.getPrivate(), TestTokens.KID, "alice", 60_000L, "ROLE_ADMIN"));
+    }
+
+    @Test
+    void tokenWithAnUnknownOrMissingKidIsRejected() {
+        assertInvalid(TestTokens.token(TestTokens.KEYS.getPrivate(), "unknown", "alice", 60_000L, "ROLE_ADMIN"));
+        assertInvalid(Jwts.builder().subject("alice").claim("auth", List.of(Map.of("authority", "ROLE_ADMIN")))
+                .expiration(new Date(System.currentTimeMillis() + 60_000))
+                .signWith(TestTokens.KEYS.getPrivate(), Jwts.SIG.RS256).compact());
+    }
+
+    @Test
+    void hmacTokenSignedWithThePublicKeyIsRejected() {
+        byte[] publicKey = TestTokens.KEYS.getPublic().getEncoded();
+        String confused = Jwts.builder().header().keyId(TestTokens.KID).and()
+                .subject("mallory").claim("auth", List.of(Map.of("authority", "ROLE_ADMIN")))
+                .expiration(new Date(System.currentTimeMillis() + 60_000))
+                .signWith(Keys.hmacShaKeyFor(publicKey), Jwts.SIG.HS256).compact();
+
+        assertInvalid(confused);
+    }
+
+    @Test
+    void aRotatedBackendKeyIsFetchedOnFirstUse() {
+        KeyPair rotated = TestTokens.generate();
+        FakeBackend backend = new FakeBackend() {
+            private int calls;
+
+            @Override
+            public JwkSet jwks() {
+                calls++;
+                return calls == 1 ? TestTokens.jwks()
+                        : new JwkSet(List.of(TestTokens.jwk("rotated", (RSAPublicKey) rotated.getPublic())));
+            }
+        };
+        JwtTokenValidator rotating = new JwtTokenValidator(new BackendKeyLocator(backend, java.time.Duration.ZERO));
+
+        assertThat(rotating.authenticate(TestTokens.token("alice", "ROLE_CLIENT")).getName()).isEqualTo("alice");
+        assertThat(rotating.authenticate(TestTokens.token(rotated.getPrivate(), "rotated", "bob", 60_000L, "ROLE_CLIENT"))
+                .getName()).isEqualTo("bob");
+    }
+
+    @Test
+    void unknownKidsDoNotRefetchMoreOftenThanTheRefreshInterval() {
+        int[] calls = {0};
+        FakeBackend backend = new FakeBackend() {
+            @Override
+            public JwkSet jwks() {
+                calls[0]++;
+                return TestTokens.jwks();
+            }
+        };
+        JwtTokenValidator throttled = new JwtTokenValidator(new BackendKeyLocator(backend, java.time.Duration.ofHours(1)));
+
+        throttled.authenticate(TestTokens.token("alice", "ROLE_CLIENT"));
+        for (int i = 0; i < 5; i++) {
+            String forged = TestTokens.token(TestTokens.KEYS.getPrivate(), "kid-" + i, "alice", 60_000L, "ROLE_CLIENT");
+            assertThatThrownBy(() -> throttled.authenticate(forged)).isInstanceOf(CustomException.class);
+        }
+
+        assertThat(calls[0]).isEqualTo(1);
+    }
+
+    @Test
+    void anUnreachableBackendIsReportedAsUnavailable() {
+        FakeBackend backend = new FakeBackend();
+        backend.setAvailable(false);
+        JwtTokenValidator offline = new JwtTokenValidator(new BackendKeyLocator(backend, java.time.Duration.ZERO));
+
+        assertThatThrownBy(() -> offline.authenticate(TestTokens.token("alice", "ROLE_CLIENT")))
+                .isInstanceOfSatisfying(CustomException.class,
+                        e -> assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
     }
 
     @Test
@@ -98,28 +174,6 @@ class JwtTokenValidatorTest {
     }
 
     @Test
-    void shortKeysAreExpandedLikeTheBackend() {
-        assertThat(JwtTokenValidator.keyBytes("abc", false)).isEqualTo("abcabcabcabcabcabcabcabcabcabcabc"
-                .getBytes(StandardCharsets.UTF_8));
-        assertThat(JwtTokenValidator.keyBytes("x".repeat(32), false)).hasSize(32);
-        assertThat(new JwtTokenValidator("abc", false).authenticate(TestTokens.token("abc", "u", 60_000L, "ROLE_CLIENT"))
-                .getName()).isEqualTo("u");
-    }
-
-    @Test
-    void secureKeyModeRejectsShortOrDevelopmentKeys() {
-        assertThatThrownBy(() -> JwtTokenValidator.keyBytes("short", true)).isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> JwtTokenValidator.keyBytes("local-development-jwt-key-change-me", true))
-                .isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> JwtTokenValidator.keyBytes(" ", false)).isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> JwtTokenValidator.keyBytes(null, false)).isInstanceOf(IllegalStateException.class);
-        assertThat(JwtTokenValidator.keyBytes("k".repeat(40), true)).hasSize(40);
-        assertThat(JwtTokenValidator.keyBytes("k".repeat(32), true)).hasSize(32);
-        assertThatThrownBy(() -> JwtTokenValidator.keyBytes("k".repeat(31), true))
-                .isInstanceOf(IllegalStateException.class);
-    }
-
-    @Test
     void bearerTokenIsExtractedFromTheHeader() {
         assertThat(JwtTokenValidator.extractToken("Bearer abc.def")).isEqualTo("abc.def");
         assertThat(JwtTokenValidator.extractToken("Basic abc")).isNull();
@@ -127,8 +181,9 @@ class JwtTokenValidatorTest {
     }
 
     private static String signed(io.jsonwebtoken.JwtBuilder builder) {
-        return builder.expiration(new Date(System.currentTimeMillis() + 60_000))
-                .signWith(Keys.hmacShaKeyFor(TestTokens.expand(TestTokens.SECRET))).compact();
+        return builder.header().keyId(TestTokens.KID).and()
+                .expiration(new Date(System.currentTimeMillis() + 60_000))
+                .signWith(TestTokens.KEYS.getPrivate(), Jwts.SIG.RS256).compact();
     }
 
     private void assertInvalid(String token) {

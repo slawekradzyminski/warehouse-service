@@ -4,6 +4,7 @@ import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.InternalOrderDto;
 import com.awesome.warehouse.client.InternalOrderItemDto;
 import com.awesome.warehouse.client.InventoryReceiptRequest;
+import com.awesome.warehouse.client.OrderRefundRequest;
 import com.awesome.warehouse.client.ReceiptLine;
 import com.awesome.warehouse.client.ReceiptType;
 import com.awesome.warehouse.controller.exception.CustomException;
@@ -22,13 +23,12 @@ import com.awesome.warehouse.repository.fulfilment.ShipmentRepository;
 import com.awesome.warehouse.repository.returns.ReturnRequestRepository;
 import com.awesome.warehouse.service.notification.CustomerMessages;
 import lombok.RequiredArgsConstructor;
-import org.springframework.context.ApplicationEventPublisher;
+import com.awesome.warehouse.service.notification.NotificationOutbox;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionOperations;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -55,20 +55,17 @@ public class ReturnService {
     private final ShipmentRepository shipmentRepository;
     private final BackendClient backendClient;
     private final OrderLocks orderLocks;
-    private final TransactionOperations transactionOperations;
-    private final ApplicationEventPublisher eventPublisher;
+    private final NotificationOutbox notificationOutbox;
     private final Clock warehouseClock;
 
     /**
-     * Opens a return. Requests for the same order are serialised so concurrent
-     * requests cannot together return more units than were bought.
+     * Opens a return. Requests for the same order are serialised with a database
+     * row lock, so concurrent requests cannot together return more units than were
+     * bought, whichever instance serves them.
      */
+    @Transactional
     public ReturnDto create(String username, Long orderId, CreateReturnDto request) {
-        return orderLocks.withOrderLock(orderId,
-                () -> transactionOperations.execute(status -> createLocked(username, orderId, request)));
-    }
-
-    private ReturnDto createLocked(String username, Long orderId, CreateReturnDto request) {
+        orderLocks.lock(orderId);
         InternalOrderDto order = backendClient.getOrder(orderId);
         if (!order.username().equals(username)) {
             throw new CustomException("Order not found", HttpStatus.NOT_FOUND);
@@ -215,10 +212,20 @@ public class ReturnService {
     public ReturnDto refund(Long id) {
         ReturnRequestEntity request = lock(id);
         require(request, "refund", ReturnStatus.RECEIVED);
-        request.setRefundAmount(estimatedRefund(request));
+        BigDecimal amount = estimatedRefund(request);
+        if (amount.signum() > 0) {
+            backendClient.refundOrder(request.getOrderId(),
+                    new OrderRefundRequest(refundRequestId(request.getId()), amount, "Return #" + request.getId()));
+        }
+        request.setRefundAmount(amount);
         request.setStatus(ReturnStatus.REFUNDED);
         request.setRefundedAt(now());
         return saveAndNotify(request);
+    }
+
+    /** Same id for every attempt to refund one return, so the backend books the money once. */
+    static UUID refundRequestId(Long returnId) {
+        return UUID.nameUUIDFromBytes(("refund-" + returnId).getBytes(StandardCharsets.UTF_8));
     }
 
     /** Same id for every attempt to restock one return, so the backend books it once. */
@@ -236,7 +243,7 @@ public class ReturnService {
 
     private ReturnDto saveAndNotify(ReturnRequestEntity request) {
         ReturnDto result = toDto(returnRepository.saveAndFlush(request));
-        eventPublisher.publishEvent(CustomerMessages.returnUpdated(request));
+        notificationOutbox.enqueue(CustomerMessages.returnUpdated(request));
         return result;
     }
 

@@ -219,7 +219,7 @@ public class PurchasingService {
      */
     static UUID backendRequestId(Long purchaseOrderId, UUID requestId) {
         return UUID.nameUUIDFromBytes(("purchase-order-" + purchaseOrderId + "-" + requestId)
-                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                .getBytes(StandardCharsets.UTF_8));
     }
 
     @Transactional(readOnly = true)

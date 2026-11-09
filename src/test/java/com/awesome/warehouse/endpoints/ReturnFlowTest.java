@@ -67,10 +67,18 @@ class ReturnFlowTest extends AbstractFlowTest {
         });
         assertThat(refunded.getStatus()).isEqualTo(ReturnStatus.REFUNDED);
         assertThat(refunded.getRefundAmount()).isEqualByComparingTo("108.00");
-        assertThat(backend.notifications()).extracting(NotificationRequest::subject).containsExactly(
-                "Return #" + requested.getId() + " is APPROVED",
-                "Return #" + requested.getId() + " is REFUNDED");
-        assertThat(backend.notifications().getLast().message()).contains("Refund: 108.00.");
+        assertThat(backend.notifications()).extracting(n -> n.properties().get("status"))
+                .containsExactly("APPROVED", "REFUNDED");
+        assertThat(backend.notifications().getLast().properties())
+                .containsEntry("returnId", String.valueOf(requested.getId()))
+                .containsEntry("orderId", String.valueOf(order.id()))
+                .containsEntry("refundAmount", "108.00");
+        assertThat(backend.refundedAmount(order.id())).isEqualByComparingTo("108.00");
+        assertThat(backend.refunds()).singleElement().satisfies(refund -> {
+            assertThat(refund.requestId()).isEqualTo(UUID.nameUUIDFromBytes(
+                    ("refund-" + requested.getId()).getBytes(StandardCharsets.UTF_8)));
+            assertThat(refund.reference()).isEqualTo("Return #" + requested.getId());
+        });
     }
 
     @Test

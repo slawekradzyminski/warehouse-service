@@ -25,6 +25,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class WarehouseFlowTest extends AbstractFlowTest {
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.awesome.warehouse.service.fulfilment.ShipmentReconciler reconciler;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.awesome.warehouse.repository.fulfilment.ShipmentRepository shipmentRepository;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.awesome.warehouse.repository.notification.NotificationOutboxRepository outboxRepository;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.awesome.warehouse.service.notification.NotificationDispatcher dispatcher;
+
     @Test
     void warehouseOperatorDrivesAnOrderFromQueueToDelivery() {
         InternalProductDto phone = backend.product("Phone", "Electronics", "25.00", 10);
@@ -64,7 +73,7 @@ class WarehouseFlowTest extends AbstractFlowTest {
                 .containsExactly(NotificationTemplate.ORDER_SHIPPED, NotificationTemplate.ORDER_DELIVERED);
         assertThat(backend.notifications().getFirst()).satisfies(n -> {
             assertThat(n.username()).isEqualTo("client");
-            assertThat(n.subject()).isEqualTo("Order #" + order.id() + " has shipped");
+            assertThat(n.properties()).containsEntry("orderId", String.valueOf(order.id()));
             assertThat(n.properties()).containsEntry("trackingNumber", "1Z999AA10123456784")
                     .containsEntry("carrier", "UPS");
         });
@@ -192,6 +201,100 @@ class WarehouseFlowTest extends AbstractFlowTest {
 
         assertThat(read.getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
         assertThat(cancelled.getContent()).extracting(ShipmentDto::getId).containsExactly(shipment.getId());
+    }
+
+    @Test
+    void aReleaseWhoseResponseWasLostKeepsItsShipmentAndCanBeRetried() {
+        InternalOrderDto order = paidOrder();
+        backend.loseNextFulfilmentResponse();
+
+        ShipmentDto created = postJson(WAREHOUSE + "/shipments", new CreateShipmentDto(order.id()), warehouseToken)
+                .as(ShipmentDto.class);
+        Response retry = postJson(WAREHOUSE + "/shipments", new CreateShipmentDto(order.id()), warehouseToken);
+
+        assertThat(created.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
+        assertThat(backend.order(order.id()).fulfilmentState()).isEqualTo(FulfilmentState.AWAITING_PICK);
+        assertThat(retry.status()).isEqualTo(409);
+        assertThat(retry.message()).isEqualTo("Order already has a shipment");
+        assertThat(transition(created.getId(), "pick", null).as(ShipmentDto.class).getStatus())
+                .isEqualTo(ShipmentStatus.PICKED);
+    }
+
+    @Test
+    void anOrderReleasedWithoutALocalShipmentCanBeReleasedAgain() {
+        InternalOrderDto order = paidOrder();
+        backend.updateFulfilment(order.id(), FulfilmentState.AWAITING_PICK);
+
+        ShipmentDto adopted = postJson(WAREHOUSE + "/shipments", new CreateShipmentDto(order.id()), warehouseToken)
+                .as(ShipmentDto.class);
+
+        assertThat(adopted.getOrderId()).isEqualTo(order.id());
+        assertThat(adopted.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
+    }
+
+    @Test
+    void theReconcilerCancelsShipmentsAndAdoptsOrphanedReleases() {
+        ShipmentDto cancelledByCustomer = releaseToWarehouse(paidOrder().id());
+        ShipmentDto active = releaseToWarehouse(paidOrder().id());
+        backend.cancelByCustomer(cancelledByCustomer.getOrderId());
+        InternalOrderDto orphan = paidOrder();
+        backend.updateFulfilment(orphan.id(), FulfilmentState.AWAITING_PICK);
+        backend.put(com.awesome.warehouse.support.FakeBackend.updatedAt(backend.order(orphan.id()),
+                java.time.LocalDateTime.now().minusMinutes(10)));
+
+        reconciler.reconcile();
+
+        assertThat(shipmentRepository.findById(cancelledByCustomer.getId()).orElseThrow().getStatus())
+                .isEqualTo(ShipmentStatus.CANCELLED);
+        assertThat(shipmentRepository.findById(active.getId()).orElseThrow().getStatus())
+                .isEqualTo(ShipmentStatus.AWAITING_PICK);
+        assertThat(shipmentRepository.findByOrderId(orphan.id())).hasValueSatisfying(adopted -> {
+            assertThat(adopted.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
+            assertThat(adopted.getCreatedBy()).isEqualTo("system");
+        });
+    }
+
+    @Test
+    void theReconcilerSkipsARunWhileTheBackendIsDown() {
+        releaseToWarehouse(paidOrder().id());
+        backend.setAvailable(false);
+
+        reconciler.reconcile();
+
+        backend.setAvailable(true);
+        assertThat(shipmentRepository.findAll()).allSatisfy(s -> assertThat(s.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK));
+    }
+
+    @Test
+    void notificationsThatTheBackendDidNotAcceptAreRetriedFromTheOutbox() {
+        ShipmentDto shipment = releaseToWarehouse(paidOrder().id());
+        transition(shipment.getId(), "pick", null);
+        transition(shipment.getId(), "pack", new PackShipmentDto(BigDecimal.ONE));
+        backend.setNotificationsDown(true);
+
+        ShipmentDto shipped = transition(shipment.getId(), "ship", new ShipShipmentDto(Carrier.DHL, "1234567890"))
+                .as(ShipmentDto.class);
+        var pending = outboxRepository.findAll();
+        backend.setNotificationsDown(false);
+        pending.forEach(row -> {
+            row.setNextAttemptAt(java.time.LocalDateTime.now().minusSeconds(1));
+            outboxRepository.save(row);
+        });
+        int sent = dispatcher.dispatchDue();
+
+        assertThat(shipped.getStatus()).isEqualTo(ShipmentStatus.SHIPPED);
+        assertThat(pending).singleElement().satisfies(row -> {
+            assertThat(row.getSentAt()).isNull();
+            assertThat(row.getAttempts()).isEqualTo(1);
+            assertThat(row.getLastError()).isEqualTo("503 Backend unavailable");
+        });
+        assertThat(sent).isEqualTo(1);
+        assertThat(backend.notifications()).singleElement().satisfies(n -> {
+            assertThat(n.template()).isEqualTo(NotificationTemplate.ORDER_SHIPPED);
+            assertThat(n.requestId()).isEqualTo(pending.getFirst().getRequestId());
+        });
+        assertThat(outboxRepository.findAll()).singleElement().satisfies(row -> assertThat(row.getSentAt()).isNotNull());
+        assertThat(dispatcher.dispatchDue()).isZero();
     }
 
     @Test

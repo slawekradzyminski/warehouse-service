@@ -20,9 +20,14 @@ Paths and bodies are identical to the backend's former endpoints:
 | `POST /api/v1/orders/{orderId}/returns`, `GET /api/v1/returns`, `GET /api/v1/returns/{id}` | any authenticated user, own orders only |
 | `/api/v1/admin/returns/**`, `/api/v1/admin/suppliers`, `/api/v1/admin/purchase-orders/**`, `GET /api/v1/admin/inventory/reorder-suggestions` | `ROLE_ADMIN` |
 
-Authentication uses the backend's access tokens (HMAC JWT, same
-`JWT_SECRET_KEY` and short-key expansion, roles in the `auth` claim). There is
-no user database. 401/403 bodies are `{"message": ...}`.
+Authentication uses the backend's RS256 access tokens (roles in the `auth`
+claim). The service holds no signing secret: it verifies tokens with the public
+keys from the backend's `GET /internal/v1/jwks.json`, cached by `kid` and
+refetched when an unknown `kid` appears (at most once per
+`JWT_JWKS_REFRESH_INTERVAL`), so backend key rotations and restarts are picked
+up. Other algorithms, including HMAC, are rejected. There is no user database.
+401/403 bodies are `{"message": ...}`; while the backend is unreachable and the
+key is not cached yet, requests get 503.
 
 ## How it talks to the backend
 
@@ -31,30 +36,54 @@ no user database. 401/403 bodies are `{"message": ...}`.
 the backend, then persist", so a failed backend call leaves no local change:
 
 - create shipment: `GET order` → save shipment → `PUT fulfilment AWAITING_PICK`
-  (the shipment row is removed again if the backend refuses);
-- pick/pack/ship/deliver: `PUT fulfilment` first; ship/deliver then send an
-  `ORDER_SHIPPED`/`ORDER_DELIVERED` notification after commit;
-- cancel: `POST warehouse-cancel`, then the shipment becomes `CANCELLED`;
+  (the shipment row is removed again if the backend refuses). The backend
+  accepts a repeated `AWAITING_PICK`, so a release whose response was lost
+  is recovered: on 503 the order is read again and the shipment is kept if
+  the release reached the backend, and an order already `AWAITING_PICK`
+  without a shipment can be released again (it is adopted);
+- pick/pack/ship/deliver: `PUT fulfilment` first; ship/deliver then queue an
+  `ORDER_SHIPPED`/`ORDER_DELIVERED` notification;
+- cancel: `POST warehouse-cancel`, then the shipment becomes `CANCELLED` (also
+  when the backend reports the order as already cancelled, so a retried
+  cancel succeeds);
 - receive return: `POST inventory/receipts` (`RETURN_RESTOCKED`,
   `requestId = UUID.nameUUIDFromBytes("return-" + id)`) for resellable lines;
-- approve/reject/refund return: `RETURN_UPDATED` notification after commit;
+- refund return: `POST orders/{id}/refunds` with the proportional amount
+  (`requestId = UUID.nameUUIDFromBytes("refund-" + id)`), then the return
+  becomes `REFUNDED`; the backend rejects refunds above the order total;
+- approve/reject/refund return: `RETURN_UPDATED` notification;
 - receive purchase order: `POST inventory/receipts` (`PURCHASE_RECEIVED`, the receipt's `requestId`).
 
 Backend 4xx responses keep status and message. 5xx, connection failures and a
 rejected service token become 503 `{"message": "Backend unavailable"}`.
-Notification failures are logged and never undo the business change.
+
+Customer notifications go through a transactional outbox
+(`notification_outbox`): the row is written in the same transaction as the
+shipment or return change, sent to `POST notifications` right after the
+commit, and retried every 30 seconds with exponential backoff (up to 10
+attempts) while the backend answers 503. Any other rejection is final. Each
+row carries a `requestId`, and the backend sends one email per `requestId`, so
+retries never duplicate emails. The notification carries only the template and
+its properties; the backend renders the text.
 
 A customer may cancel an `AWAITING_PICK` order on the backend without telling
-this service. The shipment follows lazily: reading it (`GET
-/api/v1/warehouse/shipments/{id}`) or a refused transition marks it `CANCELLED`
-(`lastActor = "system"`), and the transition answers 409 "Order was cancelled
+this service. `ShipmentReconciler` runs every minute: it cancels `AWAITING_PICK`
+shipments whose order is `CANCELLED` (`lastActor = "system"`) and adopts orders
+the backend reports as `AWAITING_PICK` without a shipment (older than two
+minutes, so in-flight releases are left alone). Between runs, reading the
+shipment (`GET /api/v1/warehouse/shipments/{id}`) or a refused transition
+reconciles it immediately, and the transition answers 409 "Order was cancelled
 by the customer".
 
-Local tables (Flyway `V1`, schema `warehouse`): `shipments` (order id, owner and
+Return requests for the same order are serialised with a database row lock
+(`order_locks`, `SELECT ... FOR UPDATE`), so the returnable-quantity check holds
+across several instances.
+
+Local tables (Flyway `V1`–`V2`, schema `warehouse`): `shipments` (order id, owner and
 unit count snapshot), `return_requests` (order id plus order total/subtotal
 snapshot for the proportional refund), `return_items` (product id, name and
 unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
-(product id and name snapshot), `purchase_receipts`.
+(product id and name snapshot), `purchase_receipts`, `notification_outbox` and `order_locks`.
 
 ## Run
 
@@ -88,7 +117,9 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 | Variable | Property | Default |
 | --- | --- | --- |
 | `SPRING_PROFILES_ACTIVE` | active profiles | none (Postgres on localhost) |
-| `JWT_SECRET_KEY` | `security.jwt.token.secret-key` | `local-development-jwt-key-change-me` (must match the backend) |
+| `JWT_JWKS_REFRESH_INTERVAL` | `security.jwt.jwks-refresh-interval` | `10s` (minimum time between JWKS refetches for unknown key ids) |
+| `WAREHOUSE_RECONCILE_ENABLED` / `_INTERVAL` | `warehouse.reconcile.*` | `true` / `PT1M` |
+| `WAREHOUSE_NOTIFICATIONS_RETRY_ENABLED` / `_RETRY_INTERVAL` | `warehouse.notifications.*` | `true` / `PT30S` |
 | `WAREHOUSE_SERVICE_TOKEN` | `warehouse.service-token` | `local-warehouse-token`; no default in `docker` |
 | `BACKEND_BASE_URL` | `backend.base-url` | `http://localhost:4001` (`http://backend:4001` in `docker`) |
 | `SPRING_DATASOURCE_URL` / `_USERNAME` / `_PASSWORD` | datasource | see profiles |

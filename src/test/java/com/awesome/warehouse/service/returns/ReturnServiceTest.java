@@ -1,6 +1,7 @@
 package com.awesome.warehouse.service.returns;
 
 import com.awesome.warehouse.client.BackendClient;
+import com.awesome.warehouse.client.OrderRefundRequest;
 import com.awesome.warehouse.client.FulfilmentState;
 import com.awesome.warehouse.client.InternalOrderDto;
 import com.awesome.warehouse.client.InternalOrderItemDto;
@@ -30,9 +31,9 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.context.ApplicationEventPublisher;
+import com.awesome.warehouse.service.notification.NotificationOutbox;
+import com.awesome.warehouse.service.notification.CustomerMessages.CustomerMessage;
 import org.springframework.http.HttpStatus;
-import org.springframework.transaction.support.TransactionOperations;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -48,6 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -60,14 +62,14 @@ class ReturnServiceTest {
     @Mock private ReturnRequestRepository returnRepository;
     @Mock private ShipmentRepository shipmentRepository;
     @Mock private BackendClient backendClient;
-    @Mock private ApplicationEventPublisher eventPublisher;
+    @Mock private NotificationOutbox notificationOutbox;
+    @Mock private OrderLocks orderLocks;
 
     private ReturnService service;
 
     @BeforeEach
     void setUp() {
-        service = new ReturnService(returnRepository, shipmentRepository, backendClient, new OrderLocks(),
-                TransactionOperations.withoutTransaction(), eventPublisher,
+        service = new ReturnService(returnRepository, shipmentRepository, backendClient, orderLocks, notificationOutbox,
                 Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC));
         lenient().when(returnRepository.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
     }
@@ -222,7 +224,7 @@ class ReturnServiceTest {
         assertThat(request.getReceivedAt()).isEqualTo(NOW);
         assertThat(request.getItems()).extracting(ReturnItemEntity::getCondition)
                 .containsExactly(ItemCondition.DAMAGED, ItemCondition.RESELLABLE);
-        verify(eventPublisher, never()).publishEvent(any());
+        verify(notificationOutbox, never()).enqueue(any());
     }
 
     @Test
@@ -282,10 +284,27 @@ class ReturnServiceTest {
         assertThat(dto.getRefundAmount()).isEqualByComparingTo("108.00");
         assertThat(request.getStatus()).isEqualTo(ReturnStatus.REFUNDED);
         assertThat(request.getRefundedAt()).isEqualTo(NOW);
-        ArgumentCaptor<NotificationRequest> notification = ArgumentCaptor.forClass(NotificationRequest.class);
-        verify(eventPublisher).publishEvent(notification.capture());
-        assertThat(notification.getValue().message())
-                .isEqualTo("Hi buyer,\n\nYour return #5 for order #42 is now REFUNDED. Refund: 108.00.");
+        ArgumentCaptor<CustomerMessage> notification = ArgumentCaptor.forClass(CustomerMessage.class);
+        verify(notificationOutbox).enqueue(notification.capture());
+        assertThat(notification.getValue().properties()).containsEntry("status", "REFUNDED")
+                .containsEntry("refundAmount", "108.00").containsEntry("orderId", "42");
+        ArgumentCaptor<OrderRefundRequest> refund = ArgumentCaptor.forClass(OrderRefundRequest.class);
+        verify(backendClient).refundOrder(eq(42L), refund.capture());
+        assertThat(refund.getValue().amount()).isEqualByComparingTo("108.00");
+        assertThat(refund.getValue().requestId()).isEqualTo(ReturnService.refundRequestId(5L));
+        assertThat(refund.getValue().reference()).isEqualTo("Return #5");
+    }
+
+    @Test
+    void aRejectedRefundLeavesTheReturnReceived() {
+        ReturnRequestEntity request = existing(ReturnStatus.RECEIVED);
+        when(backendClient.refundOrder(eq(42L), any()))
+                .thenThrow(new CustomException("Refund exceeds the refundable amount", HttpStatus.CONFLICT));
+
+        assertThatThrownBy(() -> service.refund(5L)).isInstanceOf(CustomException.class);
+        assertThat(request.getStatus()).isEqualTo(ReturnStatus.RECEIVED);
+        assertThat(request.getRefundAmount()).isNull();
+        verify(notificationOutbox, never()).enqueue(any());
     }
 
     @Test
@@ -299,10 +318,9 @@ class ReturnServiceTest {
         assertThat(request.getStatus()).isEqualTo(ReturnStatus.REJECTED);
         assertThat(request.getResolutionNote()).isEqualTo("Used");
         assertThat(request.getRejectedAt()).isEqualTo(NOW);
-        ArgumentCaptor<NotificationRequest> notification = ArgumentCaptor.forClass(NotificationRequest.class);
-        verify(eventPublisher).publishEvent(notification.capture());
-        assertThat(notification.getValue().subject()).isEqualTo("Return #5 is REJECTED");
-        assertThat(notification.getValue().message()).endsWith("is now REJECTED. Note: Used");
+        ArgumentCaptor<CustomerMessage> notification = ArgumentCaptor.forClass(CustomerMessage.class);
+        verify(notificationOutbox).enqueue(notification.capture());
+        assertThat(notification.getValue().properties()).containsEntry("note", "Used");
         assertThat(notification.getValue().properties()).containsEntry("status", "REJECTED").containsEntry("returnId", "5");
     }
 
