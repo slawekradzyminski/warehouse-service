@@ -63,6 +63,11 @@ public class ShipmentEntity {
     @Column(length = 32)
     private String trackingNumber;
 
+    /** Handed to the simulated carrier: the tracking number was generated and a scheduler advances it. */
+    @Builder.Default
+    @Column(nullable = false)
+    private boolean simulated = false;
+
     @Column(precision = 5, scale = 2)
     private BigDecimal weightKg;
 

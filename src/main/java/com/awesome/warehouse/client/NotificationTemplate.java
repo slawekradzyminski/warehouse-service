@@ -4,5 +4,7 @@ package com.awesome.warehouse.client;
 public enum NotificationTemplate {
     ORDER_SHIPPED,
     ORDER_DELIVERED,
-    RETURN_UPDATED
+    RETURN_UPDATED,
+    SHIPMENT_OUT_FOR_DELIVERY,
+    SHIPMENT_DELIVERY_FAILED
 }

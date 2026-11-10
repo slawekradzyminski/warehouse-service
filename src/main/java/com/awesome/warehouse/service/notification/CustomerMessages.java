@@ -25,7 +25,19 @@ public final class CustomerMessages {
     }
 
     public static CustomerMessage shipped(ShipmentEntity shipment) {
-        return new CustomerMessage(shipment.getUsername(), NotificationTemplate.ORDER_SHIPPED, Map.of(
+        return carrierUpdate(shipment, NotificationTemplate.ORDER_SHIPPED);
+    }
+
+    public static CustomerMessage outForDelivery(ShipmentEntity shipment) {
+        return carrierUpdate(shipment, NotificationTemplate.SHIPMENT_OUT_FOR_DELIVERY);
+    }
+
+    public static CustomerMessage deliveryFailed(ShipmentEntity shipment) {
+        return carrierUpdate(shipment, NotificationTemplate.SHIPMENT_DELIVERY_FAILED);
+    }
+
+    private static CustomerMessage carrierUpdate(ShipmentEntity shipment, NotificationTemplate template) {
+        return new CustomerMessage(shipment.getUsername(), template, Map.of(
                 "orderId", String.valueOf(shipment.getOrderId()),
                 "carrier", String.valueOf(shipment.getCarrier()),
                 "trackingNumber", String.valueOf(shipment.getTrackingNumber())));

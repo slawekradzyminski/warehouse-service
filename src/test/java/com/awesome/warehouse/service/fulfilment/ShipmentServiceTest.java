@@ -164,6 +164,20 @@ class ShipmentServiceTest {
     }
 
     @Test
+    void onlyAHandOverToTheSimulatedCarrierMarksTheShipmentSimulated() {
+        shipment.setStatus(ShipmentStatus.PACKED);
+
+        service.ship(7L, Carrier.DHL, "1234567890", "packer");
+        boolean manual = shipment.isSimulated();
+        shipment.setStatus(ShipmentStatus.PACKED);
+        service.ship(7L, Carrier.DHL, "1234567890", true, "carrier-desk");
+
+        assertThat(manual).isFalse();
+        assertThat(shipment.isSimulated()).isTrue();
+        assertThat(shipment.getLastActor()).isEqualTo("carrier-desk");
+    }
+
+    @Test
     void invalidTrackingNumbersAreRejectedBeforeAnyLockOrBackendCall() {
         shipment.setStatus(ShipmentStatus.PACKED);
 

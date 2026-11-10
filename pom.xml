@@ -11,7 +11,7 @@
 
     <groupId>com.awesome</groupId>
     <artifactId>warehouse-service</artifactId>
-    <version>1.1.1</version>
+    <version>1.2.0</version>
     <packaging>jar</packaging>
 
     <name>warehouse-service</name>
@@ -336,6 +336,7 @@
                                 <param>com.awesome.warehouse.security.JwtTokenFilter</param>
                                 <param>com.awesome.warehouse.client.RestBackendClient</param>
                                 <param>com.awesome.warehouse.client.BackendErrorMapper</param>
+                                <param>com.awesome.warehouse.service.tracking.*</param>
                             </targetClasses>
                             <targetTests>
                                 <param>com.awesome.warehouse.entity.fulfilment.CarrierTest</param>
@@ -344,6 +345,7 @@
                                 <param>com.awesome.warehouse.service.purchasing.*Test</param>
                                 <param>com.awesome.warehouse.security.*Test</param>
                                 <param>com.awesome.warehouse.client.*Test</param>
+                                <param>com.awesome.warehouse.service.tracking.*Test</param>
                             </targetTests>
                             <threads>4</threads>
                             <timestampedReports>false</timestampedReports>

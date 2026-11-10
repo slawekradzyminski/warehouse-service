@@ -14,3 +14,6 @@ backend:
 warehouse:
   service-token: ${WAREHOUSE_SERVICE_TOKEN:local-warehouse-token}
   seed-demo-data: true
+  # Faster simulated carrier for local runs.
+  carrier:
+    step-interval: ${WAREHOUSE_CARRIER_STEP_INTERVAL:PT30S}

@@ -3,6 +3,7 @@ package com.awesome.warehouse.security;
 import jakarta.servlet.DispatcherType;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -15,8 +16,8 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 
 /**
  * Stateless JWT security. Role rules live on the controllers
- * ({@code @PreAuthorize}); this chain only separates public documentation and
- * health endpoints from authenticated API calls.
+ * ({@code @PreAuthorize}); this chain only separates public documentation,
+ * health and parcel-tracking endpoints from authenticated API calls.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableMethodSecurity
@@ -33,6 +34,7 @@ public class WebSecurityConfig {
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers("/v3/api-docs", "/v3/api-docs/**", "/v3/api-docs.yaml").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/prometheus").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/v1/tracking/*").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(ex -> ex
                         .authenticationEntryPoint((request, response, e) ->

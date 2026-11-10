@@ -109,6 +109,8 @@ expect "HMAC token signed with the public modulus" "$(status_of -H "Authorizatio
 created=$(curl -sf -X POST -H "Authorization: Bearer $(token ROLE_ADMIN)" -H 'Content-Type: application/json' \
   -d '{"name":"Smoke Supply","email":"smoke@supply.test","leadTimeDays":3}' "$base/api/v1/admin/suppliers")
 grep -q 'Smoke Supply' <<< "$created" && echo "PASS create supplier (JPA write in native image)"
+expect "public tracking of an unknown number (V3 schema, no token)" \
+  "$(status_of "$base/api/v1/tracking/1234567890")" 404
 
 docker stats --no-stream --format 'memory: {{.MemUsage}}' "$RUN_ID-app"
 echo "native smoke test passed"

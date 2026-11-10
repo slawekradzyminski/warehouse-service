@@ -7,11 +7,13 @@ import com.awesome.warehouse.dto.fulfilment.PackShipmentDto;
 import com.awesome.warehouse.dto.fulfilment.PickListDto;
 import com.awesome.warehouse.dto.fulfilment.ShipShipmentDto;
 import com.awesome.warehouse.dto.fulfilment.ShipmentDto;
+import com.awesome.warehouse.dto.tracking.TrackingDto;
 import com.awesome.warehouse.dto.order.OrderDto;
 import com.awesome.warehouse.dto.order.PageDto;
 import com.awesome.warehouse.entity.fulfilment.ShipmentStatus;
 import com.awesome.warehouse.security.CustomPrincipal;
 import com.awesome.warehouse.service.fulfilment.ShipmentService;
+import com.awesome.warehouse.service.tracking.TrackingService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -52,6 +54,7 @@ public class WarehouseController {
     private static final String TRANSITION_CONFLICT = "Transition not allowed from the current shipment status";
 
     private final ShipmentService shipmentService;
+    private final TrackingService trackingService;
 
     @GetMapping("/queue")
     @Operation(summary = "Get fulfilment queue", description = "Lists PAID orders that have not been released to the warehouse yet, oldest first. Negative page is clamped to zero; size is clamped to 1-100.")
@@ -138,7 +141,9 @@ public class WarehouseController {
     }
 
     @PostMapping("/shipments/{id}/ship")
-    @Operation(summary = "Hand shipment to carrier", description = "PACKED to SHIPPED. The tracking number must match the carrier format. The order becomes SHIPPED and the customer receives an email.")
+    @Operation(summary = "Hand shipment to carrier", description = "PACKED to SHIPPED. The tracking number must match the carrier format. "
+            + "Without a tracking number the parcel goes to the simulated carrier, which generates a tracking number and moves the parcel "
+            + "through IN_TRANSIT and OUT_FOR_DELIVERY to DELIVERED on its own. The order becomes SHIPPED and the customer receives an email.")
     @ApiResponse(responseCode = "200", description = "Shipment shipped")
     @ApiResponse(responseCode = "400", description = "Missing carrier or invalid tracking number",
             content = @Content(mediaType = "application/json", schema = @Schema(anyOf = {ValidationErrorsDto.class, ErrorDto.class})))
@@ -150,7 +155,7 @@ public class WarehouseController {
             @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
             @PathVariable Long id,
             @Valid @RequestBody ShipShipmentDto request) {
-        return shipmentService.ship(id, request.getCarrier(), request.getTrackingNumber(), principal.username());
+        return trackingService.ship(id, request.getCarrier(), request.getTrackingNumber(), principal.username());
     }
 
     @PostMapping("/shipments/{id}/deliver")
@@ -163,7 +168,22 @@ public class WarehouseController {
     public ShipmentDto deliver(
             @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
             @PathVariable Long id) {
-        return shipmentService.deliver(id, principal.username());
+        return trackingService.deliver(id, principal.username());
+    }
+
+    @PostMapping("/shipments/{id}/carrier/advance")
+    @Operation(summary = "Advance simulated carrier", description = "Fast-forwards a simulated SHIPPED shipment by one carrier scan "
+            + "(IN_TRANSIT, OUT_FOR_DELIVERY, DELIVERY_FAILED or DELIVERED) without waiting for the step interval. "
+            + "The DELIVERED step delivers the shipment like the deliver endpoint.")
+    @ApiResponse(responseCode = "200", description = "Shipment advanced; returns its tracking")
+    @ApiResponse(responseCode = "404", description = "Shipment not found",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    @ApiResponse(responseCode = "409", description = "Not a simulated shipment in status SHIPPED",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    public TrackingDto advanceCarrier(
+            @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
+            @PathVariable Long id) {
+        return trackingService.advance(id, principal.username());
     }
 
     @PostMapping("/shipments/{id}/cancel")
