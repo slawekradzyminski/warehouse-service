@@ -2,8 +2,10 @@ package com.awesome.warehouse.controller.fulfilment;
 
 import com.awesome.warehouse.dto.ErrorDto;
 import com.awesome.warehouse.dto.fulfilment.ShipmentDto;
+import com.awesome.warehouse.dto.tracking.TrackingDto;
 import com.awesome.warehouse.security.CustomPrincipal;
 import com.awesome.warehouse.service.fulfilment.ShipmentService;
+import com.awesome.warehouse.service.tracking.TrackingService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -26,6 +28,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class OrderShipmentController {
 
     private final ShipmentService shipmentService;
+    private final TrackingService trackingService;
 
     @GetMapping("/api/v1/orders/{id}/shipment")
     @Operation(summary = "Track order shipment", description = "Returns the shipment for one of the caller's orders. Administrators may track any order.")
@@ -38,5 +41,19 @@ public class OrderShipmentController {
             @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
             @PathVariable Long id) {
         return shipmentService.trackOrder(id, principal.username(), principal.isAdmin());
+    }
+
+    @GetMapping("/api/v1/orders/{id}/shipment/tracking")
+    @Operation(summary = "Track order parcel", description = "Returns the carrier tracking (scans, current status, estimated delivery) "
+            + "for one of the caller's orders. Administrators may track any order. Before the hand-over to the carrier the events are empty.")
+    @ApiResponse(responseCode = "200", description = "Tracking returned")
+    @ApiResponse(responseCode = "401", description = "Unauthorized",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    @ApiResponse(responseCode = "404", description = "Order not found, or not released to the warehouse yet",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    public TrackingDto tracking(
+            @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
+            @PathVariable Long id) {
+        return trackingService.trackOrder(id, principal.username(), principal.isAdmin());
     }
 }

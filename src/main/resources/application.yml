@@ -59,6 +59,12 @@ warehouse:
   notifications:
     retry-enabled: ${WAREHOUSE_NOTIFICATIONS_RETRY_ENABLED:true}
     retry-interval: ${WAREHOUSE_NOTIFICATIONS_RETRY_INTERVAL:PT30S}
+  # Simulated carrier for shipments handed over without a tracking number: every
+  # step interval each one advances by one scan (IN_TRANSIT, IN_TRANSIT,
+  # OUT_FOR_DELIVERY, [DELIVERY_FAILED, OUT_FOR_DELIVERY,] DELIVERED).
+  carrier:
+    enabled: ${WAREHOUSE_CARRIER_ENABLED:true}
+    step-interval: ${WAREHOUSE_CARRIER_STEP_INTERVAL:PT2M}
 
 security:
   jwt:

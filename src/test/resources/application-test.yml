@@ -11,3 +11,5 @@ warehouse:
     enabled: false
   notifications:
     retry-enabled: false
+  carrier:
+    enabled: false

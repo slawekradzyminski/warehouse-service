@@ -16,7 +16,8 @@ Paths and bodies are identical to the backend's former endpoints:
 | Path | Roles |
 | --- | --- |
 | `/api/v1/warehouse/**` (queue, shipments, pick list, pick/pack/ship/deliver/cancel) | `ROLE_WAREHOUSE`, `ROLE_ADMIN` |
-| `GET /api/v1/orders/{id}/shipment` | owner, or `ROLE_ADMIN` for any order |
+| `GET /api/v1/orders/{id}/shipment`, `GET /api/v1/orders/{id}/shipment/tracking` | owner, or `ROLE_ADMIN` for any order |
+| `GET /api/v1/tracking/{trackingNumber}` | public (no token) |
 | `POST /api/v1/orders/{orderId}/returns`, `GET /api/v1/returns`, `GET /api/v1/returns/{id}` | any authenticated user, own orders only |
 | `/api/v1/admin/returns/**`, `/api/v1/admin/suppliers`, `/api/v1/admin/purchase-orders/**`, `GET /api/v1/admin/inventory/reorder-suggestions` | `ROLE_ADMIN` |
 
@@ -42,7 +43,8 @@ the backend, then persist", so a failed backend call leaves no local change:
   the release reached the backend, and an order already `AWAITING_PICK`
   without a shipment can be released again (it is adopted);
 - pick/pack/ship/deliver: `PUT fulfilment` first; ship/deliver then queue an
-  `ORDER_SHIPPED`/`ORDER_DELIVERED` notification;
+  `ORDER_SHIPPED`/`ORDER_DELIVERED` notification (and record a tracking scan,
+  see "Shipment tracking");
 - cancel: `POST warehouse-cancel`, then the shipment becomes `CANCELLED` (also
   when the backend reports the order as already cancelled, so a retried
   cancel succeeds);
@@ -79,11 +81,65 @@ Return requests for the same order are serialised with a database row lock
 (`order_locks`, `SELECT ... FOR UPDATE`), so the returnable-quantity check holds
 across several instances.
 
-Local tables (Flyway `V1`–`V2`, schema `warehouse`): `shipments` (order id, owner and
-unit count snapshot), `return_requests` (order id plus order total/subtotal
+Local tables (Flyway `V1`–`V3`, schema `warehouse`): `shipments` (order id, owner and
+unit count snapshot, `simulated` flag), `tracking_events` (carrier scans), `return_requests` (order id plus order total/subtotal
 snapshot for the proportional refund), `return_items` (product id, name and
 unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
 (product id and name snapshot), `purchase_receipts`, `notification_outbox` and `order_locks`.
+
+## Shipment tracking
+
+`POST /api/v1/warehouse/shipments/{id}/ship` with a `trackingNumber` is the
+manual flow, unchanged. Omitting `trackingNumber` (or sending `null`) hands the
+parcel to the **simulated carrier**: the service generates a tracking number in
+the carrier's format and marks the shipment `simulated`. A blank string is
+still rejected with 400.
+
+Every shipped shipment records scans in `tracking_events`: `LABEL_CREATED` at
+the hand-over and `DELIVERED` on a manual delivery confirmation. For simulated
+shipments, `CarrierSimulator` runs every `warehouse.carrier.step-interval`
+(default `PT2M`) and advances each simulated `SHIPPED` shipment whose latest
+scan is at least one interval old by one scan (batches of 100, each under a row
+lock in its own transaction, so a repeated or concurrent run is a no-op):
+
+```
+LABEL_CREATED -> IN_TRANSIT (carrier hub) -> IN_TRANSIT (delivery depot)
+  -> OUT_FOR_DELIVERY -> DELIVERED
+```
+
+If `abs(trackingNumber.hashCode()) % 5 == 0`, the first `OUT_FOR_DELIVERY` is
+followed by `DELIVERY_FAILED` and the next step goes `OUT_FOR_DELIVERY` again.
+`OUT_FOR_DELIVERY` and `DELIVERY_FAILED` queue `SHIPMENT_OUT_FOR_DELIVERY` /
+`SHIPMENT_DELIVERY_FAILED` notifications (`orderId`, `carrier`,
+`trackingNumber`). The `DELIVERED` step is the regular delivery (backend
+`PUT fulfilment DELIVERED`, `ORDER_DELIVERED` email, `lastActor = "carrier"`); a
+backend outage leaves the parcel `OUT_FOR_DELIVERY` and ends the run. Scan
+locations and texts are deterministic (each carrier's hub; the delivery city is
+derived from the tracking number).
+
+`estimatedDelivery`: the delivery time once delivered; for a simulated parcel
+the latest scan plus one step interval per remaining scan; for a manual parcel
+the hand-over plus the carrier's nominal transit days (InPost 1, DPD 2, DHL 2,
+UPS 3); `null` before the hand-over.
+
+| Endpoint | Access | Response |
+| --- | --- | --- |
+| `GET /api/v1/orders/{id}/shipment/tracking` | owner, `ROLE_ADMIN` | `TrackingDto`; 404 like `GET .../shipment` |
+| `GET /api/v1/tracking/{trackingNumber}` | public | `PublicTrackingDto` (no `orderId`, owner or address); 404 "Tracking number not found" |
+| `POST /api/v1/warehouse/shipments/{id}/carrier/advance` | `ROLE_WAREHOUSE`, `ROLE_ADMIN` | one scan now, ignoring the interval; `TrackingDto`; 409 unless simulated and `SHIPPED` |
+
+```json
+{
+  "shipmentId": 1, "orderId": 42, "carrier": "DHL", "trackingNumber": "1234567890",
+  "simulated": true, "currentStatus": "IN_TRANSIT", "estimatedDelivery": "2026-11-10T12:08:00",
+  "events": [
+    {"status": "LABEL_CREATED", "location": "Awesome Testing Warehouse, Krakow",
+     "description": "Shipping label created; the parcel is waiting for DHL pickup", "occurredAt": "2026-11-10T12:00:00"},
+    {"status": "IN_TRANSIT", "location": "DHL Hub, Leipzig",
+     "description": "Collected from the sender and sorted at the hub", "occurredAt": "2026-11-10T12:02:00"}
+  ]
+}
+```
 
 ## Run
 
@@ -105,9 +161,9 @@ Profiles:
 | Profile | Database | Backend | Notes |
 | --- | --- | --- | --- |
 | (none) | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` | `http://localhost:4001` | token `local-warehouse-token` |
-| `local` | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` (user/password `postgres`) | `http://localhost:4001` | token `local-warehouse-token`, seeds demo suppliers |
+| `local` | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` (user/password `postgres`) | `http://localhost:4001` | token `local-warehouse-token`, seeds demo suppliers, carrier step `PT30S` |
 | `docker` | Postgres `jdbc:postgresql://postgres:5432/testdb?currentSchema=warehouse` | `http://backend:4001` | `WAREHOUSE_SERVICE_TOKEN` required |
-| `demo` | – | – | combine as `docker,demo` to seed the demo suppliers |
+| `demo` | – | – | combine as `docker,demo` to seed the demo suppliers; carrier step `PT30S` |
 
 Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.test,
 7 days) and "Baltic Gadgets" (purchasing@baltic-gadgets.test, 14 days).
@@ -120,6 +176,7 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 | `JWT_JWKS_REFRESH_INTERVAL` | `security.jwt.jwks-refresh-interval` | `10s` (minimum time between JWKS refetches for unknown key ids) |
 | `WAREHOUSE_RECONCILE_ENABLED` / `_INTERVAL` | `warehouse.reconcile.*` | `true` / `PT1M` |
 | `WAREHOUSE_NOTIFICATIONS_RETRY_ENABLED` / `_RETRY_INTERVAL` | `warehouse.notifications.*` | `true` / `PT30S` |
+| `WAREHOUSE_CARRIER_ENABLED` / `_STEP_INTERVAL` | `warehouse.carrier.enabled` / `.step-interval` | `true` / `PT2M` (`PT30S` in `local` and `demo`) |
 | `WAREHOUSE_SERVICE_TOKEN` | `warehouse.service-token` | `local-warehouse-token`; no default in `docker` |
 | `BACKEND_BASE_URL` | `backend.base-url` | `http://localhost:4001` (`http://backend:4001` in `docker`) |
 | `SPRING_DATASOURCE_URL` / `_USERNAME` / `_PASSWORD` | datasource | see profiles |
@@ -188,4 +245,4 @@ for the 64 MB heap cap plus native and thread memory.
 - PITest: `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage`
   (scope: `Carrier`, `ShipmentService`, `ReturnService`, `RefundCalculator`,
   `PurchasingService`, `JwtTokenValidator`, `JwtTokenFilter`,
-  `RestBackendClient`, `BackendErrorMapper`). Advisory, not a gate.
+  `RestBackendClient`, `BackendErrorMapper`, `service.tracking.*`). Advisory, not a gate.

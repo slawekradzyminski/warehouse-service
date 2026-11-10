@@ -1,3 +1,6 @@
 # Combine with docker (SPRING_PROFILES_ACTIVE=docker,demo) to seed demo suppliers.
 warehouse:
   seed-demo-data: true
+  # Faster simulated carrier, so a demo parcel is delivered within a few minutes.
+  carrier:
+    step-interval: ${WAREHOUSE_CARRIER_STEP_INTERVAL:PT30S}

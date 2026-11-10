@@ -336,6 +336,7 @@
                                 <param>com.awesome.warehouse.security.JwtTokenFilter</param>
                                 <param>com.awesome.warehouse.client.RestBackendClient</param>
                                 <param>com.awesome.warehouse.client.BackendErrorMapper</param>
+                                <param>com.awesome.warehouse.service.tracking.*</param>
                             </targetClasses>
                             <targetTests>
                                 <param>com.awesome.warehouse.entity.fulfilment.CarrierTest</param>
@@ -344,6 +345,7 @@
                                 <param>com.awesome.warehouse.service.purchasing.*Test</param>
                                 <param>com.awesome.warehouse.security.*Test</param>
                                 <param>com.awesome.warehouse.client.*Test</param>
+                                <param>com.awesome.warehouse.service.tracking.*Test</param>
                             </targetTests>
                             <threads>4</threads>
                             <timestampedReports>false</timestampedReports>
