@@ -28,6 +28,7 @@ import tools.jackson.databind.JsonNode;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,7 +46,7 @@ class TrackingFlowTest extends AbstractFlowTest {
     @Autowired private TrackingEventRepository eventRepository;
     @Autowired private ShipmentReconciler reconciler;
 
-    private final LocalDateTime start = LocalDateTime.now().plusHours(1);
+    private final LocalDateTime start = LocalDateTime.now().truncatedTo(ChronoUnit.MICROS).plusHours(1);
 
     @Test
     void aSimulatedShipmentIsAdvancedOneScanPerStepUntilDelivered() {

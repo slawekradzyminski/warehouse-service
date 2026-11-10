@@ -4,6 +4,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Clock;
+import java.time.Duration;
 
 @Configuration(proxyBeanMethods = false)
 public class ClockConfig {
@@ -15,6 +16,7 @@ public class ClockConfig {
      */
     @Bean
     Clock warehouseClock() {
-        return Clock.systemDefaultZone();
+        // PostgreSQL stores microseconds; ticking in micros keeps returned and reloaded timestamps equal.
+        return Clock.tick(Clock.systemDefaultZone(), Duration.ofNanos(1_000));
     }
 }
