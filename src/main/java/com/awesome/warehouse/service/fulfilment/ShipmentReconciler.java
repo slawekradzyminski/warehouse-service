@@ -1,6 +1,7 @@
 package com.awesome.warehouse.service.fulfilment;
 
 import com.awesome.warehouse.controller.exception.CustomException;
+import com.awesome.warehouse.correlation.CorrelationContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -29,7 +30,8 @@ public class ShipmentReconciler {
             initialDelayString = "${warehouse.reconcile.interval:PT10M}")
     public void scheduledReconcile() {
         if (enabled) {
-            reconcile();
+            // Each run is its own unit of work in the logs and in the backend calls it makes.
+            CorrelationContext.generate().run(this::reconcile);
         }
     }
 

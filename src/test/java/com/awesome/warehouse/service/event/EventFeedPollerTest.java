@@ -86,6 +86,50 @@ class EventFeedPollerTest {
     }
 
     @Test
+    void eachEventIsHandledUnderItsOwnCorrelationIdsAndTheRunUnderAGeneratedOne() {
+        String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        FeedEvent correlated = new FeedEvent(1, UUID.randomUUID(), "order.cancelled", Instant.EPOCH, 7L, "client",
+                null, "cancel-7", traceId);
+        FeedEvent invalid = new FeedEvent(2, UUID.randomUUID(), "order.cancelled", Instant.EPOCH, 8L, "client",
+                null, "not valid!", "0".repeat(32));
+        List<Map<String, String>> contexts = new ArrayList<>();
+        doAnswer(invocation -> contexts.add(org.slf4j.MDC.getCopyOfContextMap()))
+                .when(shipments).followOrderCancellation(any());
+        when(backend.events(anyLong(), anyInt(), any())).thenAnswer(invocation -> {
+            contexts.add(org.slf4j.MDC.getCopyOfContextMap());
+            return new EventFeedPage(List.of(correlated, invalid), 2, false);
+        });
+
+        poller(true).scheduledPoll();
+
+        Map<String, String> run = contexts.get(0);
+        assertThat(run.get("requestId")).matches("[0-9a-f-]{36}");
+        assertThat(run.get("traceId")).matches("[0-9a-f]{32}");
+        assertThat(contexts.get(1)).containsEntry("requestId", "cancel-7").containsEntry("traceId", traceId);
+        assertThat(contexts.get(1).get("spanId")).matches("[0-9a-f]{16}");
+        assertThat(contexts.get(2).get("requestId")).matches("[0-9a-f-]{36}").isNotEqualTo(run.get("requestId"));
+        assertThat(contexts.get(2).get("traceId")).matches("[0-9a-f]{32}").isNotEqualTo("0".repeat(32))
+                .isNotEqualTo(run.get("traceId"));
+        assertThat(org.slf4j.MDC.getCopyOfContextMap()).isNullOrEmpty();
+    }
+
+    @Test
+    void afterAnEventTheMdcOfTheRunIsBack() {
+        FeedEvent event = new FeedEvent(1, UUID.randomUUID(), "order.cancelled", Instant.EPOCH, 7L, "client",
+                null, "cancel-7", null);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(event), 1, false));
+        com.awesome.warehouse.correlation.CorrelationContext run =
+                com.awesome.warehouse.correlation.CorrelationContext.generate();
+
+        run.run(() -> {
+            poller(true).poll();
+            assertThat(org.slf4j.MDC.get("requestId")).isEqualTo(run.requestId());
+            assertThat(org.slf4j.MDC.get("spanId")).isEqualTo(run.spanId());
+        });
+        assertThat(EventFeedPoller.correlationOf(event).requestId()).isEqualTo("cancel-7");
+    }
+
+    @Test
     void theFirstRunCreatesTheCursorAtTheStartOfTheFeed() {
         when(cursors.existsById(EventFeedPoller.CONSUMER)).thenReturn(false);
         when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(), 0, false));

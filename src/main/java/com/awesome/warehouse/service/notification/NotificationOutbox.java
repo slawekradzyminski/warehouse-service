@@ -1,5 +1,6 @@
 package com.awesome.warehouse.service.notification;
 
+import com.awesome.warehouse.correlation.CorrelationContext;
 import com.awesome.warehouse.entity.notification.NotificationOutboxEntity;
 import com.awesome.warehouse.repository.notification.NotificationOutboxRepository;
 import lombok.RequiredArgsConstructor;
@@ -11,6 +12,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -35,6 +37,8 @@ public class NotificationOutbox {
     @Transactional(propagation = Propagation.MANDATORY)
     public void enqueue(CustomerMessages.CustomerMessage message) {
         LocalDateTime now = LocalDateTime.now(warehouseClock);
+        // The request, event or job that caused the notification; restored on delivery.
+        Optional<CorrelationContext> correlation = CorrelationContext.current();
         repository.save(NotificationOutboxEntity.builder()
                 .requestId(UUID.randomUUID())
                 .username(message.username())
@@ -43,6 +47,8 @@ public class NotificationOutbox {
                 .attempts(0)
                 .nextAttemptAt(now)
                 .createdAt(now)
+                .correlationId(correlation.map(CorrelationContext::requestId).orElse(null))
+                .traceparent(correlation.map(CorrelationContext::traceparent).orElse(null))
                 .build());
         eventPublisher.publishEvent(new Enqueued());
     }

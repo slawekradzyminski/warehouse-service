@@ -18,6 +18,7 @@ import com.awesome.warehouse.client.ReceiptLine;
 import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.dto.order.OrderStatus;
 import com.awesome.warehouse.dto.order.PageDto;
+import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
 
 import java.math.BigDecimal;
@@ -54,6 +55,7 @@ public class FakeBackend implements BackendClient {
     private final Map<UUID, InventoryReceiptRequest> receipts = new ConcurrentHashMap<>();
     private final List<NotificationRequest> notifications = new CopyOnWriteArrayList<>();
     private final List<String> calls = new CopyOnWriteArrayList<>();
+    private final List<CorrelatedCall> correlatedCalls = new CopyOnWriteArrayList<>();
     private final Map<UUID, OrderRefundRequest> refunds = new ConcurrentHashMap<>();
     private final Map<Long, BigDecimal> refunded = new ConcurrentHashMap<>();
     private final List<FeedEvent> feed = new CopyOnWriteArrayList<>();
@@ -69,6 +71,7 @@ public class FakeBackend implements BackendClient {
         receipts.clear();
         notifications.clear();
         calls.clear();
+        correlatedCalls.clear();
         refunds.clear();
         refunded.clear();
         feed.clear();
@@ -164,7 +167,7 @@ public class FakeBackend implements BackendClient {
     /** Appends the event with the next sequence (the given sequence is ignored). */
     public FeedEvent publish(FeedEvent event) {
         FeedEvent stored = new FeedEvent(sequences.incrementAndGet(), event.id(), event.type(), event.occurredAt(),
-                event.orderId(), event.username(), event.data());
+                event.orderId(), event.username(), event.data(), event.requestId(), event.traceId());
         feed.add(stored);
         return stored;
     }
@@ -188,6 +191,15 @@ public class FakeBackend implements BackendClient {
 
     public List<String> calls() {
         return List.copyOf(calls);
+    }
+
+    /** Every call with the MDC correlation ids it was made under (what the HTTP client would send). */
+    public List<CorrelatedCall> correlatedCalls() {
+        return List.copyOf(correlatedCalls);
+    }
+
+    /** One backend call and the {@code requestId} / {@code traceId} in the caller's MDC. */
+    public record CorrelatedCall(String call, String requestId, String traceId) {
     }
 
     @Override
@@ -368,6 +380,7 @@ public class FakeBackend implements BackendClient {
             throw BackendErrorMapper.unavailable(new IllegalStateException("fake backend down"));
         }
         calls.add(description);
+        correlatedCalls.add(new CorrelatedCall(description, MDC.get("requestId"), MDC.get("traceId")));
     }
 
     private InternalOrderDto getOrderQuietly(long orderId) {

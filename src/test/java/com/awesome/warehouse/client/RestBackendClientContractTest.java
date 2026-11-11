@@ -176,6 +176,63 @@ class RestBackendClientContractTest {
     }
 
     @Test
+    void feedEventsCarryTheOptionalCorrelationIdsOfTheWritingRequest() {
+        server.expect(requestTo(BASE + "/internal/v1/events?after=0&limit=100"))
+                .andRespond(withSuccess("""
+                        {"events":[{"sequence":1,"id":"6f1c2a9e-0d4b-4c39-9a43-0a6d6f7f0a42","type":"order.cancelled",
+                          "occurredAt":"2026-11-11T09:30:15Z","orderId":7,"username":"client","data":{"orderId":7},
+                          "requestId":"req-7","traceId":"4bf92f3577b34da6a3ce929d0e0e4736"},
+                         {"sequence":2,"id":"6f1c2a9e-0d4b-4c39-9a43-0a6d6f7f0a43","type":"order.cancelled",
+                          "occurredAt":"2026-11-11T09:30:16Z","orderId":8,"username":"client","data":{"orderId":8},
+                          "requestId":null,"traceId":null}],
+                         "nextCursor":2,"hasMore":false}""", MediaType.APPLICATION_JSON));
+
+        List<FeedEvent> events = client.events(0, 100, List.of()).events();
+
+        server.verify();
+        assertThat(events).extracting(FeedEvent::requestId).containsExactly("req-7", null);
+        assertThat(events).extracting(FeedEvent::traceId).containsExactly("4bf92f3577b34da6a3ce929d0e0e4736", null);
+    }
+
+    @Test
+    void everyCallSendsTheCurrentRequestIdAndAChildTraceparent() {
+        String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        String ownSpan = "00f067aa0ba902b7";
+        server.expect(requestTo(BASE + "/internal/v1/orders/42"))
+                .andExpect(header("X-Request-Id", "req-42"))
+                .andExpect(header("traceparent", org.hamcrest.Matchers.matchesPattern(
+                        "00-" + traceId + "-(?!" + ownSpan + ")[0-9a-f]{16}-01")))
+                .andExpect(header("X-Service-Token", TOKEN))
+                .andRespond(withSuccess(ORDER_JSON, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/internal/v1/notifications"))
+                .andExpect(header("X-Request-Id", "req-42"))
+                .andExpect(header("traceparent", org.hamcrest.Matchers.startsWith("00-" + traceId + "-")))
+                .andRespond(withSuccess());
+
+        new com.awesome.warehouse.correlation.CorrelationContext("req-42", traceId, ownSpan).run(() -> {
+            client.getOrder(42);
+            client.sendNotification(new NotificationRequest(UUID.randomUUID(), "client",
+                    NotificationTemplate.ORDER_SHIPPED, Map.of("orderId", "42")));
+        });
+
+        server.verify();
+    }
+
+    @Test
+    void aCallOutsideAnyRequestOrJobGetsFreshValidIds() {
+        server.expect(requestTo(BASE + "/internal/v1/jwks.json"))
+                .andExpect(header("X-Request-Id", org.hamcrest.Matchers.matchesPattern("[0-9a-f-]{36}")))
+                .andExpect(header("traceparent", org.hamcrest.Matchers.matchesPattern(
+                        "00-[0-9a-f]{32}-[0-9a-f]{16}-01")))
+                .andRespond(withSuccess("{\"keys\":[]}", MediaType.APPLICATION_JSON));
+
+        client.jwks();
+
+        server.verify();
+        assertThat(org.slf4j.MDC.get("requestId")).isNull();
+    }
+
+    @Test
     void eventFeedErrorsFollowTheUsualMapping() {
         server.expect(requestTo(BASE + "/internal/v1/events?after=0&limit=100&types=order.cancelled"))
                 .andRespond(withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON)

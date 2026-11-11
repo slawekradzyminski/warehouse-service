@@ -1,6 +1,7 @@
 package com.awesome.warehouse.service.tracking;
 
 import com.awesome.warehouse.controller.exception.CustomException;
+import com.awesome.warehouse.correlation.CorrelationContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -35,7 +36,8 @@ public class CarrierSimulator {
             initialDelayString = "${warehouse.carrier.step-interval:PT2M}")
     public void scheduledStep() {
         if (enabled) {
-            advanceIdle(LocalDateTime.now(warehouseClock));
+            // Each run is its own unit of work in the logs and in the backend calls it makes.
+            CorrelationContext.generate().run(() -> advanceIdle(LocalDateTime.now(warehouseClock)));
         }
     }
 

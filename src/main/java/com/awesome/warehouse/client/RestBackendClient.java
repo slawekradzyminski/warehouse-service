@@ -1,6 +1,7 @@
 package com.awesome.warehouse.client;
 
 import com.awesome.warehouse.controller.exception.CustomException;
+import com.awesome.warehouse.correlation.CorrelationInterceptor;
 import com.awesome.warehouse.dto.order.PageDto;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpStatusCode;
@@ -36,6 +37,8 @@ public class RestBackendClient implements BackendClient {
                 .baseUrl(baseUrl)
                 .defaultHeader(SERVICE_TOKEN_HEADER, serviceToken)
                 .defaultHeader("Accept", MediaType.APPLICATION_JSON_VALUE)
+                // X-Request-Id and a child traceparent of the current request, event or job.
+                .requestInterceptor(new CorrelationInterceptor())
                 .defaultStatusHandler(HttpStatusCode::isError, (request, response) -> {
                     throw BackendErrorMapper.fromResponse(
                             response.getStatusCode(), StreamUtils.copyToByteArray(response.getBody()));
