@@ -274,6 +274,32 @@ JMX off, open-in-view off, no devtools. Recommended Compose `mem_limit`:
 128m is enough for the measured load; 160m (the contract value) leaves headroom
 for the 64 MB heap cap plus native and thread memory.
 
+## Release pipeline
+
+Pushing a `vX.Y.Z` tag runs `.github/workflows/publish-image.yml`:
+
+1. `validate` checks that the commit is on `master` and that the tag matches the project version.
+2. `check-prior-verification` reads the git tree of the tagged commit and compares it with
+   the trees of the commits behind the last 100 successful `ci.yml` runs (GitHub API,
+   `actions: read`). PRs are squash-merged, so the tag commit is new but its tree is the
+   tree of the PR head that passed CI (when the branch was up to date with `master`), or
+   of the `master` push whose run has already finished. For `pull_request` runs GitHub
+   tests the merge commit, which has that same tree when the branch is up to date.
+3. When a matching run exists, the `verify` job (`./mvnw verify` plus the amd64 native
+   build and smoke test) is skipped and the run summary links the CI run that verified
+   the tree. Otherwise it runs as before. Manual (`workflow_dispatch`) prereleases always
+   run it, and any API error falls back to the full verification. A failed or cancelled
+   `verify` still blocks the release.
+4. `build` compiles the native image on an amd64 and an arm64 runner, pushes each by
+   digest and runs `scripts/native-smoke.sh` against that pushed image on both paths, so
+   every published architecture is booted against Postgres; `publish` merges the digests.
+
+A tag whose tree already passed `ci.yml` publishes in about 14 minutes instead of 20.
+
+The release does not reuse the image from the PR: `ci.yml` builds `warehouse-service:native`
+locally and never pushes it, and the published image carries the release commit in its
+labels and is built on both architectures.
+
 ## Mutation testing
 
 - PITest: `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage`

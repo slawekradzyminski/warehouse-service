@@ -22,9 +22,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -76,6 +76,66 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  # A tag push releases a squash-merge commit whose git tree is identical to a PR head that already
+  # passed the CI workflow. When any successful CI run tested that exact tree, re-running the same
+  # tests here only delays the release. Manual prereleases and unmatched trees stay fully verified.
+  check-prior-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      verified: ${{ steps.lookup.outputs.verified }}
+    steps:
+      - name: Look for a successful CI run on the same git tree
+        id: lookup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_WORKFLOW: ci.yml
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          verified=false
+          if [ "$EVENT_NAME" != "push" ]; then
+            echo "Manual prerelease: running the full verification."
+          elif ! tree=$(gh api "repos/$REPO/git/commits/$GITHUB_SHA" --jq .tree.sha) || [ -z "$tree" ]; then
+            echo "::warning::Could not read the tree of $GITHUB_SHA; running the full verification."
+          elif ! runs=$(gh api "repos/$REPO/actions/workflows/$CI_WORKFLOW/runs?status=success&per_page=100" \
+              --jq '.workflow_runs[] | "\(.head_sha) \(.html_url)"'); then
+            echo "::warning::Could not list successful $CI_WORKFLOW runs; running the full verification."
+          else
+            echo "Release commit $GITHUB_SHA has tree $tree."
+            while read -r sha url; do
+              [ -n "$sha" ] || continue
+              if [ "$(gh api "repos/$REPO/git/commits/$sha" --jq .tree.sha 2>/dev/null)" = "$tree" ]; then
+                echo "Tree $tree already passed $CI_WORKFLOW on $sha: $url"
+                echo "Verification skipped: tree \`$tree\` already passed $CI_WORKFLOW in $url" >> "$GITHUB_STEP_SUMMARY"
+                verified=true
+                break
+              fi
+            done < <(awk '!seen[$1]++' <<< "$runs")
+            [ "$verified" = true ] || echo "No successful $CI_WORKFLOW run tested tree $tree; running the full verification."
+          fi
+          echo "verified=$verified" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: [validate, check-prior-verification]
+    if: needs.check-prior-verification.outputs.verified != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Java
+        uses: actions/setup-java@v6.2.0
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
       - name: Verify application
         run: ./mvnw --batch-mode verify
 
@@ -88,7 +148,14 @@ jobs:
   # native-image cannot cross-compile and is impractically slow under QEMU, so each platform is built
   # on a runner of its own architecture, pushed by digest, and merged into one manifest list below.
   build:
-    needs: verify
+    needs: [validate, check-prior-verification, verify]
+    # verify is skipped when the same tree already passed ci.yml. !cancelled() lets this job start
+    # despite that skip; a failed, cancelled or otherwise skipped verification still blocks the release.
+    if: >-
+      !cancelled() &&
+      needs.validate.result == 'success' &&
+      needs.check-prior-verification.result == 'success' &&
+      (needs.check-prior-verification.outputs.verified == 'true' || needs.verify.result == 'success')
     strategy:
       fail-fast: true
       matrix:
@@ -157,6 +224,12 @@ jobs:
           sbom: true
           provenance: mode=max
 
+      # The image that is actually published, booted on its own architecture before the manifest exists.
+      - name: Smoke test the native image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: scripts/native-smoke.sh "$IMAGE"
+
       - name: Export platform digest
         shell: bash
         env:
@@ -174,7 +247,9 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [verify, build]
+    needs: [validate, build]
+    # A skipped upstream verify job would otherwise skip this job implicitly.
+    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -209,7 +284,7 @@ jobs:
             ghcr.io/${{ github.repository }}
             slawekradzyminski/warehouse-service
           tags: |
-            type=raw,value=${{ needs.verify.outputs.version }}
+            type=raw,value=${{ needs.validate.outputs.version }}
             type=sha,prefix=sha-
           flavor: |
             latest=false
@@ -219,7 +294,7 @@ jobs:
         shell: bash
         working-directory: ${{ runner.temp }}/digests
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
+          VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -euo pipefail
           for image in "ghcr.io/${{ github.repository }}" slawekradzyminski/warehouse-service; do
@@ -240,7 +315,7 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Published warehouse-service image
 
-          - Version: `${{ needs.verify.outputs.version }}`
+          - Version: `${{ needs.validate.outputs.version }}`
           - Digest: `${{ steps.manifest.outputs.digest }}`
           - Image: GraalVM native executable (JVM fallback: `Dockerfile.jvm`, not published)
           - Platforms: `linux/amd64`, `linux/arm64` (built natively per architecture)
