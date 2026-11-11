@@ -40,4 +40,10 @@ public interface BackendClient {
 
     /** The backend's access-token verification keys. */
     JwkSet jwks();
+
+    /**
+     * Domain events with a sequence greater than {@code after}, oldest first, at most
+     * {@code limit} (1..200), restricted to the given wire type names.
+     */
+    EventFeedPage events(long after, int limit, Collection<String> types);
 }

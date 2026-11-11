@@ -165,6 +165,20 @@ public class RestBackendClient implements BackendClient {
                 .body(JwkSet.class));
     }
 
+    @Override
+    public EventFeedPage events(long after, int limit, Collection<String> types) {
+        return call(() -> restClient.get()
+                .uri(uri -> {
+                    uri.path("/internal/v1/events").queryParam("after", after).queryParam("limit", limit);
+                    if (!types.isEmpty()) {
+                        uri.queryParam("types", String.join(",", types));
+                    }
+                    return uri.build();
+                })
+                .retrieve()
+                .body(EventFeedPage.class));
+    }
+
     private static <T> T call(Supplier<T> request) {
         try {
             T body = request.get();

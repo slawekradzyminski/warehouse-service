@@ -140,6 +140,59 @@ class RestBackendClientContractTest {
     }
 
     @Test
+    void eventFeedIsReadAfterTheCursorWithLimitAndTypes() {
+        server.expect(requestTo(BASE + "/internal/v1/events?after=41&limit=100&types=order.cancelled,order.paid"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header("X-Service-Token", TOKEN))
+                .andExpect(header("Accept", MediaType.APPLICATION_JSON_VALUE))
+                .andRespond(withSuccess("""
+                        {"events":[{"sequence":42,"id":"6f1c2a9e-0d4b-4c39-9a43-0a6d6f7f0a42","type":"order.cancelled",
+                          "occurredAt":"2026-11-11T09:30:15.123Z","orderId":7,"username":"client",
+                          "data":{"orderId":7,"status":"CANCELLED","totalAmount":126.00,"failureCode":null}}],
+                         "nextCursor":42,"hasMore":true}""", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/internal/v1/events?after=0&limit=1"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"events\":[],\"nextCursor\":0,\"hasMore\":false}",
+                        MediaType.APPLICATION_JSON));
+
+        EventFeedPage page = client.events(41, 100, List.of("order.cancelled", "order.paid"));
+        EventFeedPage empty = client.events(0, 1, List.of());
+
+        server.verify();
+        assertThat(page.nextCursor()).isEqualTo(42);
+        assertThat(page.hasMore()).isTrue();
+        assertThat(page.events()).singleElement().satisfies(event -> {
+            assertThat(event.sequence()).isEqualTo(42);
+            assertThat(event.id()).isEqualTo(UUID.fromString("6f1c2a9e-0d4b-4c39-9a43-0a6d6f7f0a42"));
+            assertThat(event.type()).isEqualTo("order.cancelled");
+            assertThat(event.occurredAt()).isEqualTo(java.time.Instant.parse("2026-11-11T09:30:15.123Z"));
+            assertThat(event.orderId()).isEqualTo(7L);
+            assertThat(event.username()).isEqualTo("client");
+            assertThat(event.data()).containsEntry("status", "CANCELLED").containsEntry("failureCode", null);
+            assertThat(((Number) event.data().get("orderId")).longValue()).isEqualTo(7L);
+        });
+        assertThat(empty.events()).isEmpty();
+        assertThat(empty.hasMore()).isFalse();
+    }
+
+    @Test
+    void eventFeedErrorsFollowTheUsualMapping() {
+        server.expect(requestTo(BASE + "/internal/v1/events?after=0&limit=100&types=order.cancelled"))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"message\":\"limit must be between 1 and 200\"}"));
+        server.expect(requestTo(BASE + "/internal/v1/events?after=0&limit=100&types=order.cancelled"))
+                .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+
+        assertThatThrownBy(() -> client.events(0, 100, List.of("order.cancelled")))
+                .isInstanceOfSatisfying(CustomException.class, e -> {
+                    assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(e.getMessage()).isEqualTo("limit must be between 1 and 200");
+                });
+        assertUnavailable(() -> client.events(0, 100, List.of("order.cancelled")));
+        server.verify();
+    }
+
+    @Test
     void fulfilmentUpdateIsAPutWithTheState() {
         server.expect(requestTo(BASE + "/internal/v1/orders/42/fulfilment"))
                 .andExpect(method(HttpMethod.PUT))

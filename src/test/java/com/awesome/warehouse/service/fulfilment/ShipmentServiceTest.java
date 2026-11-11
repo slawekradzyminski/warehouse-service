@@ -362,6 +362,47 @@ class ShipmentServiceTest {
         assertThat(active.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
     }
 
+    @ParameterizedTest
+    @EnumSource(value = ShipmentStatus.class, names = {"AWAITING_PICK", "PICKED"})
+    void aCancelledOrderFromTheFeedCancelsAnUnpackedShipmentWithoutCallingTheBackend(ShipmentStatus status) {
+        shipment.setStatus(status);
+        shipment.setLastActor("picker");
+        when(shipmentRepository.findByOrderId(42L)).thenReturn(Optional.of(shipment));
+
+        assertThat(service.followOrderCancellation(42L)).isTrue();
+
+        assertThat(shipment.getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
+        assertThat(shipment.getCancelledAt()).isEqualTo(NOW);
+        assertThat(shipment.getLastActor()).isEqualTo(ShipmentService.SYSTEM_ACTOR);
+        verify(shipmentRepository).findByIdForUpdate(7L);
+        verify(shipmentRepository).saveAndFlush(shipment);
+        org.mockito.Mockito.verifyNoInteractions(backendClient);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = ShipmentStatus.class, names = {"PACKED", "SHIPPED", "DELIVERED", "CANCELLED"})
+    void aCancelledOrderFromTheFeedLeavesLaterShipmentsAlone(ShipmentStatus status) {
+        shipment.setStatus(status);
+        when(shipmentRepository.findByOrderId(42L)).thenReturn(Optional.of(shipment));
+
+        assertThat(service.followOrderCancellation(42L)).isFalse();
+
+        assertThat(shipment.getStatus()).isEqualTo(status);
+        assertThat(shipment.getCancelledAt()).isNull();
+        verify(shipmentRepository, never()).saveAndFlush(any());
+        org.mockito.Mockito.verifyNoInteractions(backendClient);
+    }
+
+    @Test
+    void aCancelledOrderWithoutShipmentIsIgnored() {
+        when(shipmentRepository.findByOrderId(42L)).thenReturn(Optional.empty());
+
+        assertThat(service.followOrderCancellation(42L)).isFalse();
+
+        verify(shipmentRepository, never()).findByIdForUpdate(anyLong());
+        verify(shipmentRepository, never()).saveAndFlush(any());
+    }
+
     @Test
     void reconciliationWithoutAwaitingShipmentsDoesNotCallTheBackend() {
         when(shipmentRepository.findByStatus(eq(ShipmentStatus.AWAITING_PICK), any()))

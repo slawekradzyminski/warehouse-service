@@ -9,6 +9,8 @@ spring:
 warehouse:
   reconcile:
     enabled: false
+  events:
+    enabled: false
   notifications:
     retry-enabled: false
   carrier:
