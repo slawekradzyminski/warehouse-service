@@ -68,24 +68,56 @@ row carries a `requestId`, and the backend sends one email per `requestId`, so
 retries never duplicate emails. The notification carries only the template and
 its properties; the backend renders the text.
 
-A customer may cancel an `AWAITING_PICK` order on the backend without telling
-this service. `ShipmentReconciler` runs every minute: it cancels `AWAITING_PICK`
-shipments whose order is `CANCELLED` (`lastActor = "system"`) and adopts orders
-the backend reports as `AWAITING_PICK` without a shipment (older than two
-minutes, so in-flight releases are left alone). Between runs, reading the
-shipment (`GET /api/v1/warehouse/shipments/{id}`) or a refused transition
-reconciles it immediately, and the transition answers 409 "Order was cancelled
-by the customer".
+A customer may cancel an order on the backend; the backend never calls this
+service, so cancellations reach it through the **event feed** (see below)
+within seconds. `ShipmentReconciler` stays as a safety net and runs every ten
+minutes: it cancels `AWAITING_PICK` shipments whose order is `CANCELLED`
+(`lastActor = "system"`) and adopts orders the backend reports as
+`AWAITING_PICK` without a shipment (older than two minutes, so in-flight
+releases are left alone). Between runs, reading the shipment
+(`GET /api/v1/warehouse/shipments/{id}`) or a refused transition reconciles it
+immediately, and the transition answers 409 "Order was cancelled by the
+customer".
+
+### Event feed
+
+`EventFeedPoller` reads the backend's durable domain event feed every
+`warehouse.events.poll-interval` (default `PT5S`):
+`GET /internal/v1/events?after={cursor}&limit=100&types=order.cancelled`, which
+answers `{events: [{sequence, id, type, occurredAt, orderId, username, data}],
+nextCursor, hasMore}` ordered by `sequence`. A run follows `hasMore` for up to
+ten pages.
+
+- `order.cancelled`: the order's shipment becomes `CANCELLED`
+  (`lastActor = "system"`, `cancelledAt` set) when it is `AWAITING_PICK` or
+  `PICKED`. The backend is not called, because the order is already cancelled
+  there. `PACKED` and `SHIPPED` shipments are left alone and logged (the
+  backend refuses those cancellations); finished shipments and orders without
+  a shipment are ignored. A warehouse cancellation echoed by the feed is a no-op.
+- Each event is handled in its own transaction that locks the consumer's row in
+  `event_cursors`, skips event ids already in `processed_events`, applies the
+  change, records the event id and advances the cursor, so handling is
+  idempotent and several instances never process one event concurrently. After
+  a page the cursor moves to `nextCursor` (past events of other types).
+- Backend unavailable or a 4xx from the feed: logged, the run ends and the next
+  one resumes from the stored cursor. An event whose handling fails (for
+  example one without an `orderId`) is logged with its id and recorded as
+  processed, so it never blocks the feed.
+
+The feed needs backend 3.16.0 or later. Against an older backend the request
+answers 404, which is logged on every run; the reconciler still cancels
+shipments, only later.
 
 Return requests for the same order are serialised with a database row lock
 (`order_locks`, `SELECT ... FOR UPDATE`), so the returnable-quantity check holds
 across several instances.
 
-Local tables (Flyway `V1`–`V3`, schema `warehouse`): `shipments` (order id, owner and
+Local tables (Flyway `V1`–`V4`, schema `warehouse`): `shipments` (order id, owner and
 unit count snapshot, `simulated` flag), `tracking_events` (carrier scans), `return_requests` (order id plus order total/subtotal
 snapshot for the proportional refund), `return_items` (product id, name and
 unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
-(product id and name snapshot), `purchase_receipts`, `notification_outbox` and `order_locks`.
+(product id and name snapshot), `purchase_receipts`, `notification_outbox`, `order_locks`,
+`event_cursors` (last feed sequence per consumer) and `processed_events` (handled feed event ids).
 
 ## Shipment tracking
 
@@ -174,7 +206,8 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 | --- | --- | --- |
 | `SPRING_PROFILES_ACTIVE` | active profiles | none (Postgres on localhost) |
 | `JWT_JWKS_REFRESH_INTERVAL` | `security.jwt.jwks-refresh-interval` | `10s` (minimum time between JWKS refetches for unknown key ids) |
-| `WAREHOUSE_RECONCILE_ENABLED` / `_INTERVAL` | `warehouse.reconcile.*` | `true` / `PT1M` |
+| `WAREHOUSE_EVENTS_ENABLED` / `WAREHOUSE_EVENTS_POLL_INTERVAL` | `warehouse.events.enabled` / `.poll-interval` | `true` / `PT5S` |
+| `WAREHOUSE_RECONCILE_ENABLED` / `_INTERVAL` | `warehouse.reconcile.*` | `true` / `PT10M` |
 | `WAREHOUSE_NOTIFICATIONS_RETRY_ENABLED` / `_RETRY_INTERVAL` | `warehouse.notifications.*` | `true` / `PT30S` |
 | `WAREHOUSE_CARRIER_ENABLED` / `_STEP_INTERVAL` | `warehouse.carrier.enabled` / `.step-interval` | `true` / `PT2M` (`PT30S` in `local` and `demo`) |
 | `WAREHOUSE_SERVICE_TOKEN` | `warehouse.service-token` | `local-warehouse-token`; no default in `docker` |
@@ -192,7 +225,8 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 No Docker, Postgres or backend is needed. Flow tests boot the service on H2
 (`test` profile, test-scoped driver) and
 replace the HTTP client with `FakeBackend`, an in-memory implementation of the
-internal-API rules. `RestBackendClientContractTest` pins every internal-API
+internal-API rules (including the event feed; scheduled jobs are disabled in the
+`test` profile and driven explicitly). `RestBackendClientContractTest` pins every internal-API
 request (method, path, query, `X-Service-Token`, JSON body) with
 `MockRestServiceServer`.
 
@@ -245,4 +279,4 @@ for the 64 MB heap cap plus native and thread memory.
 - PITest: `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage`
   (scope: `Carrier`, `ShipmentService`, `ReturnService`, `RefundCalculator`,
   `PurchasingService`, `JwtTokenValidator`, `JwtTokenFilter`,
-  `RestBackendClient`, `BackendErrorMapper`, `service.tracking.*`). Advisory, not a gate.
+  `RestBackendClient`, `BackendErrorMapper`, `service.tracking.*`, `service.event.*`). Advisory, not a gate.

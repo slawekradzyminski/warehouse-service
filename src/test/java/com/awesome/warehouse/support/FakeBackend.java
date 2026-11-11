@@ -2,6 +2,8 @@ package com.awesome.warehouse.support;
 
 import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.BackendErrorMapper;
+import com.awesome.warehouse.client.EventFeedPage;
+import com.awesome.warehouse.client.FeedEvent;
 import com.awesome.warehouse.client.FulfilmentState;
 import com.awesome.warehouse.client.InternalAddressDto;
 import com.awesome.warehouse.client.InternalOrderDto;
@@ -19,6 +21,7 @@ import com.awesome.warehouse.dto.order.PageDto;
 import org.springframework.http.HttpStatus;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -33,8 +36,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * In-memory backend implementing the internal-API rules from the contract
- * (fulfilment transitions, warehouse-cancel, idempotent receipts), so flow
- * tests run without Docker or HTTP.
+ * (fulfilment transitions, warehouse-cancel, idempotent receipts, the domain
+ * event feed), so flow tests run without Docker or HTTP.
  */
 public class FakeBackend implements BackendClient {
 
@@ -53,6 +56,8 @@ public class FakeBackend implements BackendClient {
     private final List<String> calls = new CopyOnWriteArrayList<>();
     private final Map<UUID, OrderRefundRequest> refunds = new ConcurrentHashMap<>();
     private final Map<Long, BigDecimal> refunded = new ConcurrentHashMap<>();
+    private final List<FeedEvent> feed = new CopyOnWriteArrayList<>();
+    private final AtomicLong sequences = new AtomicLong();
     private volatile boolean available = true;
     private volatile boolean refuseFulfilment;
     private volatile boolean loseNextFulfilmentResponse;
@@ -66,6 +71,8 @@ public class FakeBackend implements BackendClient {
         calls.clear();
         refunds.clear();
         refunded.clear();
+        feed.clear();
+        sequences.set(0);
         available = true;
         refuseFulfilment = false;
         loseNextFulfilmentResponse = false;
@@ -137,10 +144,38 @@ public class FakeBackend implements BackendClient {
         orders.put(order.id(), order);
     }
 
-    /** Customer cancellation on the backend while the order awaits pick. */
+    /** Customer cancellation on the backend while the order awaits pick; publishes {@code order.cancelled}. */
     public void cancelByCustomer(Long orderId) {
         InternalOrderDto order = orders.get(orderId);
-        orders.put(orderId, with(order, OrderStatus.CANCELLED, FulfilmentState.CANCELLED));
+        InternalOrderDto cancelled = with(order, OrderStatus.CANCELLED, FulfilmentState.CANCELLED);
+        orders.put(orderId, cancelled);
+        publish("order.cancelled", cancelled);
+    }
+
+    /** Appends a domain event for the order to the feed, like the backend's synchronous event listener. */
+    public FeedEvent publish(String type, InternalOrderDto order) {
+        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("orderId", order.id());
+        data.put("status", order.status().name());
+        data.put("totalAmount", order.totalAmount());
+        return publish(new FeedEvent(0, UUID.randomUUID(), type, Instant.now(), order.id(), order.username(), data));
+    }
+
+    /** Appends the event with the next sequence (the given sequence is ignored). */
+    public FeedEvent publish(FeedEvent event) {
+        FeedEvent stored = new FeedEvent(sequences.incrementAndGet(), event.id(), event.type(), event.occurredAt(),
+                event.orderId(), event.username(), event.data());
+        feed.add(stored);
+        return stored;
+    }
+
+    /** Lets the sequence jump, as when the backend has events of types this consumer does not read. */
+    public void skipSequences(long count) {
+        sequences.addAndGet(count);
+    }
+
+    public List<FeedEvent> feed() {
+        return List.copyOf(feed);
     }
 
     public List<NotificationRequest> notifications() {
@@ -251,6 +286,23 @@ public class FakeBackend implements BackendClient {
     }
 
     @Override
+    public EventFeedPage events(long after, int limit, Collection<String> types) {
+        call("GET events after " + after);
+        if (limit < 1 || limit > 200 || after < 0) {
+            throw new CustomException("Invalid event feed parameters", HttpStatus.BAD_REQUEST);
+        }
+        List<FeedEvent> matching = feed.stream()
+                .filter(e -> e.sequence() > after)
+                .filter(e -> types.isEmpty() || types.contains(e.type()))
+                .toList();
+        List<FeedEvent> page = matching.stream().limit(limit).toList();
+        boolean hasMore = matching.size() > limit;
+        // Without more matching events the cursor moves to the newest sequence scanned.
+        long nextCursor = hasMore ? page.getLast().sequence() : Math.max(after, sequences.get());
+        return new EventFeedPage(page, nextCursor, hasMore);
+    }
+
+    @Override
     public JwkSet jwks() {
         call("GET jwks");
         return TestTokens.jwks();
@@ -269,6 +321,7 @@ public class FakeBackend implements BackendClient {
         }
         InternalOrderDto updated = with(order, OrderStatus.CANCELLED, FulfilmentState.CANCELLED);
         orders.put(orderId, updated);
+        publish("order.cancelled", updated);
         return updated;
     }
 

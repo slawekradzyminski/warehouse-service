@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Boots the warehouse-service image against a real Postgres and checks that the
 # native binary migrates the schema, seeds demo data, validates backend-style
-# RS256 JWTs against a JWKS and serves health, metrics and OpenAPI. Instead of a
-# backend, a static busybox server publishes the JWKS at /internal/v1/jwks.json;
-# the other checks only touch endpoints answered from the service's database.
+# RS256 JWTs against a JWKS, consumes the event feed and serves health, metrics
+# and OpenAPI. Instead of a backend, a busybox server publishes the JWKS at
+# /internal/v1/jwks.json and a one-event feed at /internal/v1/events (a CGI script
+# behind an httpd proxy rule); the other checks only touch endpoints answered from
+# the service's database.
 #   scripts/native-smoke.sh warehouse-service:native
 set -euo pipefail
 
@@ -39,7 +41,18 @@ KID="native-smoke-key"
 mkdir -p "$WORK/www/internal/v1"
 printf '{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"%s","n":"%s","e":"%s"}]}' \
   "$KID" "$MODULUS" "$EXPONENT" > "$WORK/www/internal/v1/jwks.json"
-printf '.json:application/json\n' > "$WORK/httpd.conf"
+# Event feed: one order.cancelled event for an order without a shipment (sequence 1), then nothing.
+mkdir -p "$WORK/www/cgi-bin"
+cat > "$WORK/www/cgi-bin/events" <<'FEED'
+#!/bin/sh
+printf 'Content-Type: application/json\r\n\r\n'
+case "$QUERY_STRING" in
+  after=0\&*) printf '%s' '{"events":[{"sequence":1,"id":"8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11","type":"order.cancelled","occurredAt":"2026-11-11T09:30:15.123Z","orderId":999999,"username":"smoke","data":{"orderId":999999,"status":"CANCELLED","totalAmount":10.00,"failureCode":null}}],"nextCursor":1,"hasMore":false}' ;;
+  *) printf '%s' '{"events":[],"nextCursor":1,"hasMore":false}' ;;
+esac
+FEED
+chmod 755 "$WORK/www/cgi-bin/events"
+printf '.json:application/json\nP:/internal/v1/events:http://127.0.0.1:4001/cgi-bin/events\n' > "$WORK/httpd.conf"
 chmod -R a+rX "$WORK/www" "$WORK/httpd.conf"
 
 token() {
@@ -84,6 +97,7 @@ docker run -d --name "$RUN_ID-app" --network "$NETWORK" --memory 160m -p "$PORT:
   -e SPRING_DATASOURCE_USERNAME=warehouse -e SPRING_DATASOURCE_PASSWORD=warehouse \
   -e WAREHOUSE_SERVICE_TOKEN=native-smoke-service-token \
   -e BACKEND_BASE_URL="http://$RUN_ID-jwks:4001" \
+  -e WAREHOUSE_EVENTS_POLL_INTERVAL=PT1S \
   "$IMAGE" >/dev/null
 
 base="http://localhost:$PORT"
@@ -111,6 +125,16 @@ created=$(curl -sf -X POST -H "Authorization: Bearer $(token ROLE_ADMIN)" -H 'Co
 grep -q 'Smoke Supply' <<< "$created" && echo "PASS create supplier (JPA write in native image)"
 expect "public tracking of an unknown number (V3 schema, no token)" \
   "$(status_of "$base/api/v1/tracking/1234567890")" 404
+
+psql_value() { docker exec "$RUN_ID-db" psql -U warehouse -d warehouse -tAc "$1"; }
+for _ in $(seq 1 30); do
+  [[ "$(psql_value "select last_sequence from warehouse.event_cursors where consumer = 'warehouse-service'")" == 1 ]] && break
+  sleep 1
+done
+expect "event feed cursor (V4 schema, feed JSON binding)" \
+  "$(psql_value "select last_sequence from warehouse.event_cursors where consumer = 'warehouse-service'")" 1
+expect "processed event recorded" \
+  "$(psql_value "select count(*) from warehouse.processed_events where event_id = '8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11'")" 1
 
 docker stats --no-stream --format 'memory: {{.MemUsage}}' "$RUN_ID-app"
 echo "native smoke test passed"

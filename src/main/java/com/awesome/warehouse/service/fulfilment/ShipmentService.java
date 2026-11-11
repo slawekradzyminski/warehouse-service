@@ -121,8 +121,8 @@ public class ShipmentService {
     }
 
     /**
-     * Follows customer cancellations made on the backend (which does not call back):
-     * every AWAITING_PICK shipment whose order is now CANCELLED becomes CANCELLED.
+     * Safety net behind the event feed: follows customer cancellations made on the backend
+     * (which does not call back): every AWAITING_PICK shipment whose order is now CANCELLED becomes CANCELLED.
      *
      * @return the number of shipments cancelled
      */
@@ -149,6 +149,38 @@ public class ShipmentService {
             }
         }
         return cancelled;
+    }
+
+    /**
+     * Follows an {@code order.cancelled} event from the backend feed: the order's shipment
+     * becomes CANCELLED (lastActor {@code system}) when it is still AWAITING_PICK or PICKED.
+     * The backend is not called, because the order is already cancelled there. PACKED and
+     * SHIPPED shipments are left alone (the backend refuses those cancellations, so such
+     * an event points to a race worth logging); unknown orders and finished shipments are
+     * ignored.
+     *
+     * @return whether a shipment was cancelled
+     */
+    @Transactional
+    public boolean followOrderCancellation(Long orderId) {
+        Optional<ShipmentEntity> candidate = shipmentRepository.findByOrderId(orderId);
+        if (candidate.isEmpty()) {
+            log.debug("Order {} was cancelled before it reached the warehouse", orderId);
+            return false;
+        }
+        ShipmentEntity shipment = lock(candidate.get().getId());
+        switch (shipment.getStatus()) {
+            case AWAITING_PICK, PICKED -> {
+                followCancellation(shipment);
+                log.info("Shipment {} cancelled because order {} was cancelled", shipment.getId(), orderId);
+                return true;
+            }
+            case PACKED, SHIPPED -> log.warn("Order {} was cancelled but shipment {} is already {}; left unchanged",
+                    orderId, shipment.getId(), shipment.getStatus());
+            default -> log.debug("Order {} was cancelled; shipment {} is already {}",
+                    orderId, shipment.getId(), shipment.getStatus());
+        }
+        return false;
     }
 
     /**
@@ -369,11 +401,16 @@ public class ShipmentService {
         if (order.fulfilmentState() != FulfilmentState.CANCELLED) {
             return false;
         }
+        followCancellation(shipment);
+        return true;
+    }
+
+    /** The shipment follows a cancellation made on the backend (reconciler, refused transition, event feed). */
+    private void followCancellation(ShipmentEntity shipment) {
         shipment.setStatus(ShipmentStatus.CANCELLED);
         shipment.setCancelledAt(now());
         shipment.setLastActor(SYSTEM_ACTOR);
         shipmentRepository.saveAndFlush(shipment);
-        return true;
     }
 
     private ShipmentEntity lock(Long id) {

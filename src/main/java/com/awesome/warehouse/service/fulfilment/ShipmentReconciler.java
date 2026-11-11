@@ -9,7 +9,8 @@ import org.springframework.stereotype.Component;
 /**
  * Periodically aligns shipments with the backend orders: cancels shipments whose order the
  * customer cancelled, and adopts orders released to the warehouse without a local shipment.
- * A backend outage only skips the run.
+ * Cancellations normally arrive within seconds through {@code EventFeedPoller}; this run
+ * (every ten minutes by default) is the safety net. A backend outage only skips the run.
  */
 @Slf4j
 @Component
@@ -24,8 +25,8 @@ public class ShipmentReconciler {
         this.enabled = enabled;
     }
 
-    @Scheduled(fixedDelayString = "${warehouse.reconcile.interval:PT1M}",
-            initialDelayString = "${warehouse.reconcile.interval:PT1M}")
+    @Scheduled(fixedDelayString = "${warehouse.reconcile.interval:PT10M}",
+            initialDelayString = "${warehouse.reconcile.interval:PT10M}")
     public void scheduledReconcile() {
         if (enabled) {
             reconcile();

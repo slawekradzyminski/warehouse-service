@@ -1,5 +1,7 @@
 package com.awesome.warehouse.config;
 
+import com.awesome.warehouse.client.EventFeedPage;
+import com.awesome.warehouse.client.FeedEvent;
 import com.awesome.warehouse.client.FulfilmentUpdateRequest;
 import com.awesome.warehouse.client.InternalOrderDto;
 import com.awesome.warehouse.client.InternalProductDto;
@@ -31,6 +33,9 @@ import java.util.List;
  *       ({@code Classes.newInstance("io.jsonwebtoken.impl...")}); exactly those
  *       classes (and the Jackson (de)serializers found through ServiceLoader)
  *       are registered for reflective construction.</li>
+ *   <li>Hibernate's multi-id loader instantiates an array of each entity's id type
+ *       reflectively; {@code UUID[]} ({@code processed_events}) and {@code String[]}
+ *       ({@code event_cursors}) are not covered by Spring's JPA hints.</li>
  *   <li>Flyway migrations and the Postgres driver are covered by Spring Boot's
  *       hints and the GraalVM reachability-metadata repository
  *       ({@code add-reachability-metadata} in the {@code native} profile).</li>
@@ -48,6 +53,8 @@ import java.util.List;
     OrderRefundRequest.class,
     JwkSet.class,
     JwkSet.Jwk.class,
+    EventFeedPage.class,
+    FeedEvent.class,
     PageDto.class,
     ErrorDto.class
 })
@@ -79,10 +86,16 @@ public class NativeRuntimeHints {
                 "io.jsonwebtoken.jackson.io.JacksonDeserializer",
                 "io.jsonwebtoken.jackson.io.JacksonSerializer");
 
+        /** Id array types Hibernate instantiates reflectively (see the class comment). */
+        static final List<Class<?>> ENTITY_ID_ARRAYS = List.of(java.util.UUID[].class, String[].class);
+
         @Override
         public void registerHints(RuntimeHints hints, ClassLoader classLoader) {
             for (String type : JJWT_REFLECTIVE_TYPES) {
                 hints.reflection().registerType(TypeReference.of(type), MemberCategory.INVOKE_DECLARED_CONSTRUCTORS);
+            }
+            for (Class<?> idArray : ENTITY_ID_ARRAYS) {
+                hints.reflection().registerType(idArray);
             }
             hints.resources().registerPattern("db/migration/*.sql");
         }
