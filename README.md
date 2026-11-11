@@ -112,12 +112,37 @@ Return requests for the same order are serialised with a database row lock
 (`order_locks`, `SELECT ... FOR UPDATE`), so the returnable-quantity check holds
 across several instances.
 
-Local tables (Flyway `V1`–`V4`, schema `warehouse`): `shipments` (order id, owner and
+Local tables (Flyway `V1`–`V5`, schema `warehouse`): `shipments` (order id, owner and
 unit count snapshot, `simulated` flag), `tracking_events` (carrier scans), `return_requests` (order id plus order total/subtotal
 snapshot for the proportional refund), `return_items` (product id, name and
 unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
-(product id and name snapshot), `purchase_receipts`, `notification_outbox`, `order_locks`,
+(product id and name snapshot), `purchase_receipts`, `notification_outbox` (with the enqueuing request's `correlation_id` and `traceparent`), `order_locks`,
 `event_cursors` (last feed sequence per consumer) and `processed_events` (handled feed event ids).
+
+## Correlation IDs and logging
+
+- `CorrelationFilter` runs before every other filter. It keeps a valid incoming
+  `X-Request-Id` (1–128 characters of `[A-Za-z0-9._-]`) and the trace id of a
+  valid W3C `traceparent` (`00-<32 hex>-<16 hex>-<2 hex>`, ids not all zeros);
+  anything missing or invalid is generated (a UUID request id, a random trace
+  id). Every request gets a new span id. `requestId`, `traceId` and `spanId` are
+  in the MDC for the request, `X-Request-Id` is returned on every response
+  (also 401/403), and the MDC is cleared afterwards.
+- Every backend call (`RestBackendClient`) sends the current `X-Request-Id` and a
+  child `traceparent` (same trace id, new parent id).
+- Event feed: each event is handled (and logged) under the `requestId` and
+  `traceId` of the backend request that wrote it (optional feed fields from
+  backend 3.17.0); events without them get generated ids.
+- Notification outbox: the ids are stored at enqueue time (`correlation_id`,
+  `traceparent`) and restored for delivery, so the `POST
+  /internal/v1/notifications` carries the request id of the request that
+  caused it, also on a retry. Rows from before 1.4.0 get fresh ids.
+- Scheduled jobs (event poll, reconciler, carrier simulator, notification
+  retries) run each tick under a generated request and trace id.
+- Logs: the default console lines include `[traceId,requestId]`.
+  `LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs` (what the server Compose sets)
+  writes one ECS JSON object per line with `requestId`, `traceId` and `spanId`
+  as fields; it works in the native image (`scripts/native-smoke.sh` checks it).
 
 ## Shipment tracking
 
@@ -214,6 +239,7 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 | `BACKEND_BASE_URL` | `backend.base-url` | `http://localhost:4001` (`http://backend:4001` in `docker`) |
 | `SPRING_DATASOURCE_URL` / `_USERNAME` / `_PASSWORD` | datasource | see profiles |
 | `MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE` | actuator exposure | `health,prometheus` |
+| `LOGGING_STRUCTURED_FORMAT_CONSOLE` | `logging.structured.format.console` | unset (human-readable lines with `[traceId,requestId]`); `ecs` for JSON lines |
 
 ## Test
 
@@ -305,4 +331,4 @@ labels and is built on both architectures.
 - PITest: `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage`
   (scope: `Carrier`, `ShipmentService`, `ReturnService`, `RefundCalculator`,
   `PurchasingService`, `JwtTokenValidator`, `JwtTokenFilter`,
-  `RestBackendClient`, `BackendErrorMapper`, `service.tracking.*`, `service.event.*`). Advisory, not a gate.
+  `RestBackendClient`, `BackendErrorMapper`, `service.tracking.*`, `service.event.*`, `correlation.*`). Advisory, not a gate.

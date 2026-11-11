@@ -70,4 +70,4 @@ in-memory `FakeBackend`, which implements the contract's internal-API rules.
 
 # Native smoke test
 
-- `docker build -t warehouse-service:native . && scripts/native-smoke.sh warehouse-service:native` boots the native binary against a real Postgres (under a 160 MiB limit) and checks migrations, demo seeding, JWT validation, a JPA write, event feed consumption (cursor and processed event), health, metrics and OpenAPI. Run it after dependency bumps and entity changes: JVM tests cannot see missing native metadata or lazy-proxy limits. CI runs it on every push and pull request.
+- `docker build -t warehouse-service:native . && scripts/native-smoke.sh warehouse-service:native` boots the native binary against a real Postgres (under a 160 MiB limit) and checks migrations, demo seeding, JWT validation, a JPA write, event feed consumption (cursor and processed event), correlation ids (X-Request-Id echo, outbound headers, ECS JSON log fields), health, metrics and OpenAPI. Run it after dependency bumps and entity changes: JVM tests cannot see missing native metadata or lazy-proxy limits. CI runs it on every push and pull request.

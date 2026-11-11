@@ -35,6 +35,23 @@ class CarrierSimulatorTest {
     }
 
     @Test
+    void eachScheduledStepRunsWithItsOwnGeneratedCorrelationIds() {
+        java.util.List<String> requestIds = new java.util.ArrayList<>();
+        when(trackingService.idleSimulatedShipments(NOW)).thenAnswer(invocation -> {
+            requestIds.add(org.slf4j.MDC.get("requestId"));
+            assertThat(org.slf4j.MDC.get("traceId")).matches("[0-9a-f]{32}");
+            return List.of();
+        });
+        CarrierSimulator simulator = new CarrierSimulator(trackingService, CLOCK, true);
+
+        simulator.scheduledStep();
+        simulator.scheduledStep();
+
+        assertThat(requestIds).hasSize(2).doesNotContainNull().doesNotHaveDuplicates();
+        assertThat(org.slf4j.MDC.get("requestId")).isNull();
+    }
+
+    @Test
     void onlyShipmentsThatAdvancedAreCountedAndOtherFailuresDoNotStopTheRun() {
         when(trackingService.idleSimulatedShipments(NOW)).thenReturn(List.of(1L, 2L, 3L, 4L));
         when(trackingService.advanceIfIdle(1L, NOW)).thenReturn(true);

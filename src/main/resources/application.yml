@@ -95,3 +95,8 @@ springdoc:
 logging:
   level:
     root: INFO
+  # Human-readable lines carry [traceId,requestId] from the MDC (set by CorrelationFilter,
+  # the event feed and the scheduled jobs). LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs switches
+  # to JSON lines in which requestId, traceId and spanId are fields.
+  pattern:
+    correlation: "[%X{traceId:-},%X{requestId:-}] "

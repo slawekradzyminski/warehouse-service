@@ -60,4 +60,12 @@ public class NotificationOutboxEntity {
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
+
+    /** {@code X-Request-Id} of the request, event or job that enqueued the notification. */
+    @Column(name = "correlation_id", length = 128)
+    private String correlationId;
+
+    /** W3C {@code traceparent} of the enqueuing hop; delivery continues that trace. */
+    @Column(length = 55)
+    private String traceparent;
 }

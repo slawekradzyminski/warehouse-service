@@ -3,6 +3,7 @@ package com.awesome.warehouse.service.notification;
 import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.NotificationRequest;
 import com.awesome.warehouse.controller.exception.CustomException;
+import com.awesome.warehouse.correlation.CorrelationContext;
 import com.awesome.warehouse.entity.notification.NotificationOutboxEntity;
 import com.awesome.warehouse.repository.notification.NotificationOutboxRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -30,7 +31,7 @@ import java.util.Map;
  * commits, and again on a schedule for those that failed. A backend outage (503) is retried
  * with exponential backoff; any other rejection (for example 404 for a deleted user) is
  * final. The backend drops duplicates by requestId, so a retry after a lost response never
- * sends a second email.
+ * sends a second email. Each delivery runs with the correlation ids stored at enqueue time.
  */
 @Slf4j
 @Component
@@ -71,7 +72,7 @@ public class NotificationDispatcher {
             initialDelayString = "${warehouse.notifications.retry-interval:PT30S}")
     public void retryDue() {
         if (retryEnabled) {
-            dispatchDue();
+            CorrelationContext.generate().run(this::dispatchDue);
         }
     }
 
@@ -88,7 +89,16 @@ public class NotificationDispatcher {
         return sent;
     }
 
+    /**
+     * Sends with the correlation ids stored at enqueue time in the MDC, so the delivery is
+     * logged and sent under the request that caused it (rows without ids get fresh ones).
+     */
     private boolean send(NotificationOutboxEntity notification) {
+        return CorrelationContext.fromHeaders(notification.getCorrelationId(), notification.getTraceparent())
+                .call(() -> deliver(notification));
+    }
+
+    private boolean deliver(NotificationOutboxEntity notification) {
         try {
             backendClient.sendNotification(new NotificationRequest(notification.getRequestId(),
                     notification.getUsername(), notification.getTemplate(),

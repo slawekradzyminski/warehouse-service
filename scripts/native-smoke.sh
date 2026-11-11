@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Boots the warehouse-service image against a real Postgres and checks that the
 # native binary migrates the schema, seeds demo data, validates backend-style
-# RS256 JWTs against a JWKS, consumes the event feed and serves health, metrics
-# and OpenAPI. Instead of a backend, a busybox server publishes the JWKS at
+# RS256 JWTs against a JWKS, consumes the event feed, propagates correlation ids
+# (X-Request-Id / traceparent, ECS JSON logs) and serves health, metrics and OpenAPI. Instead of a backend, a busybox server publishes the JWKS at
 # /internal/v1/jwks.json and a one-event feed at /internal/v1/events (a CGI script
 # behind an httpd proxy rule); the other checks only touch endpoints answered from
 # the service's database.
@@ -42,12 +42,15 @@ mkdir -p "$WORK/www/internal/v1"
 printf '{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"%s","n":"%s","e":"%s"}]}' \
   "$KID" "$MODULUS" "$EXPONENT" > "$WORK/www/internal/v1/jwks.json"
 # Event feed: one order.cancelled event for an order without a shipment (sequence 1), then nothing.
+# The event carries the correlation ids of the backend request that wrote it; the script
+# records the X-Request-Id and traceparent headers of every feed request.
 mkdir -p "$WORK/www/cgi-bin"
 cat > "$WORK/www/cgi-bin/events" <<'FEED'
 #!/bin/sh
+echo "$HTTP_X_REQUEST_ID $HTTP_TRACEPARENT" >> /tmp/feed-headers
 printf 'Content-Type: application/json\r\n\r\n'
 case "$QUERY_STRING" in
-  after=0\&*) printf '%s' '{"events":[{"sequence":1,"id":"8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11","type":"order.cancelled","occurredAt":"2026-11-11T09:30:15.123Z","orderId":999999,"username":"smoke","data":{"orderId":999999,"status":"CANCELLED","totalAmount":10.00,"failureCode":null}}],"nextCursor":1,"hasMore":false}' ;;
+  after=0\&*) printf '%s' '{"events":[{"sequence":1,"id":"8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11","type":"order.cancelled","occurredAt":"2026-11-11T09:30:15.123Z","orderId":999999,"username":"smoke","data":{"orderId":999999,"status":"CANCELLED","totalAmount":10.00,"failureCode":null},"requestId":"smoke-feed-request","traceId":"0af7651916cd43dd8448eb211c80319c"}],"nextCursor":1,"hasMore":false}' ;;
   *) printf '%s' '{"events":[],"nextCursor":1,"hasMore":false}' ;;
 esac
 FEED
@@ -98,6 +101,7 @@ docker run -d --name "$RUN_ID-app" --network "$NETWORK" --memory 160m -p "$PORT:
   -e WAREHOUSE_SERVICE_TOKEN=native-smoke-service-token \
   -e BACKEND_BASE_URL="http://$RUN_ID-jwks:4001" \
   -e WAREHOUSE_EVENTS_POLL_INTERVAL=PT1S \
+  -e LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs \
   "$IMAGE" >/dev/null
 
 base="http://localhost:$PORT"
@@ -135,6 +139,21 @@ expect "event feed cursor (V4 schema, feed JSON binding)" \
   "$(psql_value "select last_sequence from warehouse.event_cursors where consumer = 'warehouse-service'")" 1
 expect "processed event recorded" \
   "$(psql_value "select count(*) from warehouse.processed_events where event_id = '8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11'")" 1
+
+header_of() { curl -s -o /dev/null -D - "${@:2}" | tr -d '\r' | awk -v name="$1" 'tolower($1) == tolower(name) ":" { print $2 }'; }
+expect "valid X-Request-Id is returned" "$(header_of X-Request-Id -H 'X-Request-Id: smoke-req.1' "$base/actuator/health")" smoke-req.1
+generated=$(header_of X-Request-Id -H 'X-Request-Id: not valid!' "$base/actuator/health")
+[[ "$generated" =~ ^[0-9a-f-]{36}$ ]] && echo "PASS invalid X-Request-Id is replaced ($generated)" \
+  || { echo "FAIL invalid X-Request-Id came back as '$generated'" >&2; exit 1; }
+feed_headers=$(docker exec "$RUN_ID-jwks" tail -n 1 /tmp/feed-headers)
+[[ "$feed_headers" =~ ^[0-9a-f-]{36}\ 00-[0-9a-f]{32}-[0-9a-f]{16}-01$ ]] \
+  && echo "PASS feed requests send X-Request-Id and traceparent ($feed_headers)" \
+  || { echo "FAIL feed request headers: '$feed_headers'" >&2; exit 1; }
+event_log=$(docker logs "$RUN_ID-app" 2>&1 | grep '"requestId":"smoke-feed-request"' | grep 'Handled event' | head -n 1)
+grep -q '"traceId":"0af7651916cd43dd8448eb211c80319c"' <<< "$event_log" && grep -q '"spanId":"[0-9a-f]\{16\}"' <<< "$event_log" \
+  && echo "PASS ECS JSON log of the feed event carries its requestId, traceId and spanId" \
+  || { echo "FAIL no ECS log line with the event's correlation ids" >&2; exit 1; }
+echo "$event_log"
 
 docker stats --no-stream --format 'memory: {{.MemUsage}}' "$RUN_ID-app"
 echo "native smoke test passed"

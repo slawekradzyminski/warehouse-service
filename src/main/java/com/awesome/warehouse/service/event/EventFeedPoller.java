@@ -4,6 +4,7 @@ import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.EventFeedPage;
 import com.awesome.warehouse.client.FeedEvent;
 import com.awesome.warehouse.controller.exception.CustomException;
+import com.awesome.warehouse.correlation.CorrelationContext;
 import com.awesome.warehouse.entity.event.EventCursorEntity;
 import com.awesome.warehouse.entity.event.ProcessedEventEntity;
 import com.awesome.warehouse.repository.event.EventCursorRepository;
@@ -32,6 +33,10 @@ import java.util.List;
  * advances the cursor. A backend outage ends the run; the next tick resumes from the
  * cursor. An event whose handling fails is logged with its id and skipped, so one bad
  * event never blocks the feed. {@code ShipmentReconciler} remains as a slow safety net.
+ *
+ * <p>Each scheduled run has its own generated correlation ids; while an event is handled the
+ * MDC (and so every log line and backend call made for it) carries the event's
+ * {@code requestId} and {@code traceId}, or generated ones when the event has none.
  */
 @Slf4j
 @Component
@@ -70,7 +75,7 @@ public class EventFeedPoller {
             initialDelayString = "${warehouse.events.poll-interval:PT5S}")
     public void scheduledPoll() {
         if (enabled) {
-            poll();
+            CorrelationContext.generate().run(this::poll);
         }
     }
 
@@ -93,7 +98,7 @@ public class EventFeedPoller {
                 return handled;
             }
             for (FeedEvent event : page.events()) {
-                Outcome outcome = process(event);
+                Outcome outcome = correlationOf(event).call(() -> process(event));
                 if (outcome == Outcome.STOPPED) {
                     return handled;
                 }
@@ -115,9 +120,14 @@ public class EventFeedPoller {
         return cursors.findById(CONSUMER).map(EventCursorEntity::getLastSequence).orElse(0L);
     }
 
+    /** The ids of the backend request that wrote the event; invalid or missing ones are generated. */
+    static CorrelationContext correlationOf(FeedEvent event) {
+        return CorrelationContext.fromIds(event.requestId(), event.traceId());
+    }
+
     private Outcome process(FeedEvent event) {
         try {
-            return transaction.execute(status -> {
+            Outcome outcome = transaction.execute(status -> {
                 EventCursorEntity cursor = lockCursor();
                 if (processedEvents.existsById(event.id())) {
                     moveCursor(cursor, event.sequence());
@@ -127,6 +137,10 @@ public class EventFeedPoller {
                 markProcessed(event, cursor);
                 return Outcome.HANDLED;
             });
+            if (outcome == Outcome.HANDLED) {
+                log.info("Handled event {} ({} #{})", event.id(), event.type(), event.sequence());
+            }
+            return outcome;
         } catch (RuntimeException e) {
             log.error("Event {} ({} #{}) could not be handled and is skipped", event.id(), event.type(),
                     event.sequence(), e);
