@@ -219,22 +219,13 @@ public class ShipmentService {
     }
 
     /**
-     * Returns one shipment. An AWAITING_PICK shipment is first checked against
-     * the backend, because the customer may have cancelled the order there
-     * (the backend does not call back); if the backend cannot be reached the
-     * local state is returned unchanged.
+     * Returns one shipment as stored locally. Reads never change state: customer
+     * cancellations arrive through the backend event feed ({@code EventFeedPoller})
+     * and, as a safety net, through {@code ShipmentReconciler}.
      */
-    @Transactional
+    @Transactional(readOnly = true)
     public ShipmentDto get(Long id) {
-        ShipmentEntity shipment = find(id);
-        if (shipment.getStatus() == ShipmentStatus.AWAITING_PICK) {
-            try {
-                markCancelledIfOrderCancelled(shipment, backendClient.getOrder(shipment.getOrderId()));
-            } catch (CustomException e) {
-                log.warn("Could not refresh shipment {} from the backend: {}", id, e.getMessage());
-            }
-        }
-        return toDto(shipment);
+        return toDto(find(id));
     }
 
     @Transactional(readOnly = true)

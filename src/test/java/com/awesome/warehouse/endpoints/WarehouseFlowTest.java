@@ -191,16 +191,16 @@ class WarehouseFlowTest extends AbstractFlowTest {
     }
 
     @Test
-    void customerCancellationIsVisibleWhenTheShipmentIsRead() {
+    void readingAShipmentDoesNotApplyACustomerCancellation() {
         ShipmentDto shipment = releaseToWarehouse(paidOrder().id());
         backend.cancelByCustomer(shipment.getOrderId());
 
         ShipmentDto read = getJson(WAREHOUSE + "/shipments/" + shipment.getId(), warehouseToken).as(ShipmentDto.class);
-        PageDto<ShipmentDto> cancelled = getJson(WAREHOUSE + "/shipments?status=CANCELLED", warehouseToken)
-                .as(new TypeReference<PageDto<ShipmentDto>>() {});
+        ShipmentDto readAgain = getJson(WAREHOUSE + "/shipments/" + shipment.getId(), warehouseToken).as(ShipmentDto.class);
 
-        assertThat(read.getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
-        assertThat(cancelled.getContent()).extracting(ShipmentDto::getId).containsExactly(shipment.getId());
+        // GET is safe: the cancellation is applied by the event feed poller (EventFeedFlowTest)
+        assertThat(read.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
+        assertThat(readAgain.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
     }
 
     @Test

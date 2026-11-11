@@ -528,24 +528,11 @@ class ShipmentServiceTest {
     }
 
     @Test
-    void readingAnAwaitingPickShipmentPicksUpACustomerCancellation() {
-        when(backendClient.getOrder(42L)).thenReturn(order(OrderStatus.CANCELLED, FulfilmentState.CANCELLED));
-
-        assertThat(service.get(7L)).satisfies(dto -> {
-            assertThat(dto.getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
-            assertThat(dto.getLastActor()).isEqualTo("system");
-            assertThat(dto.getCancelledAt()).isEqualTo(NOW);
-        });
-        verify(shipmentRepository).saveAndFlush(shipment);
-    }
-
-    @Test
-    void readingKeepsTheLocalStateWhenTheOrderIsActiveOrTheBackendIsDown() {
-        when(backendClient.getOrder(42L)).thenReturn(order(OrderStatus.PAID, FulfilmentState.AWAITING_PICK));
+    void readingAnAwaitingPickShipmentNeverChangesItOrCallsTheBackend() {
+        // the customer cancellation reaches the warehouse through the event feed, not through reads
         assertThat(service.get(7L).getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
 
-        when(backendClient.getOrder(42L)).thenThrow(new CustomException("Backend unavailable", HttpStatus.SERVICE_UNAVAILABLE));
-        assertThat(service.get(7L).getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
+        verify(backendClient, never()).getOrder(anyLong());
         verify(shipmentRepository, never()).saveAndFlush(any());
     }
 
