@@ -6,6 +6,7 @@ import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.correlation.CorrelationContext;
 import com.awesome.warehouse.entity.notification.NotificationOutboxEntity;
 import com.awesome.warehouse.repository.notification.NotificationOutboxRepository;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
@@ -13,9 +14,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
@@ -25,6 +26,13 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Sends outbox notifications to the backend: right after the transaction that wrote them
@@ -32,6 +40,12 @@ import java.util.Map;
  * with exponential backoff; any other rejection (for example 404 for a deleted user) is
  * final. The backend drops duplicates by requestId, so a retry after a lost response never
  * sends a second email. Each delivery runs with the correlation ids stored at enqueue time.
+ *
+ * <p>The after-commit trigger only hands the work to a single dispatch thread: the listener
+ * runs on the committing thread before its database connection is released, so sending there
+ * would need a second connection (and wait for the backend) while holding the first, which
+ * starves the small pool under concurrent requests. Dispatching never runs inside a
+ * transaction, and HTTP calls to the backend happen between its short transactions.
  */
 @Slf4j
 @Component
@@ -49,6 +63,13 @@ public class NotificationDispatcher {
     private final TransactionTemplate transaction;
     private final Clock warehouseClock;
     private final boolean retryEnabled;
+    private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "notification-dispatch");
+        thread.setDaemon(true);
+        return thread;
+    });
+    /** A dispatch is queued and has not started yet, so further triggers can rely on it. */
+    private final AtomicBoolean queued = new AtomicBoolean();
 
     public NotificationDispatcher(NotificationOutboxRepository repository, BackendClient backendClient,
                                   PlatformTransactionManager transactionManager, Clock warehouseClock,
@@ -56,16 +77,65 @@ public class NotificationDispatcher {
         this.repository = repository;
         this.backendClient = backendClient;
         this.transaction = new TransactionTemplate(transactionManager);
-        // Runs after the enqueuing transaction committed, where REQUIRED would join that
-        // finished transaction and silently lose every write.
-        this.transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.warehouseClock = warehouseClock;
         this.retryEnabled = retryEnabled;
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void afterEnqueue(NotificationOutbox.Enqueued event) {
-        dispatchDue();
+        requestDispatch();
+    }
+
+    /**
+     * Queues one dispatch run unless one is already queued and not started: that run reads the
+     * outbox after this call, so it also sees rows committed before it.
+     */
+    void requestDispatch() {
+        if (!queued.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            executor.execute(() -> {
+                queued.set(false);
+                CorrelationContext.generate().run(this::dispatchQuietly);
+            });
+        } catch (RejectedExecutionException e) {
+            queued.set(false);
+            log.debug("Dispatcher is shutting down; the scheduled retry sends the notification");
+        }
+    }
+
+    private void dispatchQuietly() {
+        try {
+            dispatchDue();
+        } catch (RuntimeException e) {
+            log.warn("Notification dispatch failed; the scheduled retry sends the notifications: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Waits until every dispatch queued before this call has finished (tests and shutdown).
+     *
+     * @return whether the queued dispatches finished within the timeout
+     */
+    public boolean awaitIdle(Duration timeout) {
+        try {
+            executor.submit(() -> { }).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException | TimeoutException | RejectedExecutionException e) {
+            return false;
+        }
+    }
+
+    @PreDestroy
+    void shutdown() throws InterruptedException {
+        executor.shutdown();
+        if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+            executor.shutdownNow();
+        }
     }
 
     @Scheduled(fixedDelayString = "${warehouse.notifications.retry-interval:PT30S}",
@@ -76,8 +146,15 @@ public class NotificationDispatcher {
         }
     }
 
-    /** Sends every due notification; synchronized so one instance never sends a row twice at once. */
+    /**
+     * Sends every due notification; synchronized so one instance never sends a row twice at
+     * once. Must not be called inside a transaction: it opens its own short ones and calls the
+     * backend between them, so a caller holding a connection would wait for a second one.
+     */
     public synchronized int dispatchDue() {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Notifications are dispatched outside transactions");
+        }
         List<NotificationOutboxEntity> due = transaction.execute(status -> repository.findDue(
                 LocalDateTime.now(warehouseClock), MAX_ATTEMPTS, PageRequest.of(0, BATCH_SIZE)));
         int sent = 0;

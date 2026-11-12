@@ -27,6 +27,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import com.awesome.warehouse.service.notification.NotificationOutbox;
 import com.awesome.warehouse.service.notification.CustomerMessages.CustomerMessage;
 import org.springframework.http.HttpStatus;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -63,8 +66,10 @@ class ShipmentServiceTest {
 
     @BeforeEach
     void setUp() {
+        PlatformTransactionManager transactions = org.mockito.Mockito.mock(PlatformTransactionManager.class);
+        lenient().when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
         service = new ShipmentService(shipmentRepository, backendClient, notificationOutbox,
-                Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC));
+                Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC), new TransactionTemplate(transactions));
         shipment = ShipmentEntity.builder().id(7L).orderId(42L).username("buyer").totalUnits(5)
                 .status(ShipmentStatus.AWAITING_PICK).build();
         lenient().when(shipmentRepository.findById(7L)).thenReturn(Optional.of(shipment));

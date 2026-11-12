@@ -27,6 +27,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -44,6 +45,11 @@ import java.util.Set;
  * Warehouse shipment state machine. Every transition locks the shipment row,
  * validates the transition locally, mirrors it onto the backend order and only
  * then persists it, so a failed backend call leaves no local change.
+ *
+ * <p>Connection budget (the pool is small): a request holds at most one database
+ * connection at a time. Backend reads that need no lock (the order snapshot of a release,
+ * pick lists, tracking lookups, reconciliation) run outside transactions; only the mirror
+ * call of a transition runs while its row lock, and so its one connection, is held.
  */
 @Slf4j
 @Service
@@ -59,6 +65,7 @@ public class ShipmentService {
     private final BackendClient backendClient;
     private final NotificationOutbox notificationOutbox;
     private final Clock warehouseClock;
+    private final TransactionTemplate transaction;
 
     public PageDto<OrderDto> queue(int page, int size) {
         return OrderViews.page(backendClient.fulfilmentQueue(page, size));
@@ -74,8 +81,10 @@ public class ShipmentService {
      * without a local shipment is adopted. When the backend call itself fails
      * (503, including timeouts) the order is read again and the shipment is kept
      * if the release did reach the backend.
+     *
+     * <p>The order snapshot is read before the transaction starts, so no connection waits
+     * for that call.
      */
-    @Transactional
     public ShipmentDto create(Long orderId, String actor) {
         InternalOrderDto order = backendClient.getOrder(orderId);
         if (order.status() != OrderStatus.PAID) {
@@ -83,8 +92,16 @@ public class ShipmentService {
         }
         boolean releasable = order.fulfilmentState() == FulfilmentState.NONE
                 || order.fulfilmentState() == FulfilmentState.AWAITING_PICK;
-        if (!releasable || shipmentRepository.existsByOrderId(orderId)) {
-            throw new CustomException("Order already has a shipment", HttpStatus.CONFLICT);
+        if (!releasable) {
+            throw alreadyReleased();
+        }
+        return transaction.execute(status -> release(order, actor));
+    }
+
+    private ShipmentDto release(InternalOrderDto order, String actor) {
+        Long orderId = order.id();
+        if (shipmentRepository.existsByOrderId(orderId)) {
+            throw alreadyReleased();
         }
         ShipmentEntity shipment = shipmentRepository.saveAndFlush(newShipment(order, actor));
         try {
@@ -99,6 +116,10 @@ public class ShipmentService {
             throw e;
         }
         return toDto(shipment);
+    }
+
+    private static CustomException alreadyReleased() {
+        return new CustomException("Order already has a shipment", HttpStatus.CONFLICT);
     }
 
     private boolean releasedOnBackend(Long orderId) {
@@ -123,10 +144,11 @@ public class ShipmentService {
     /**
      * Safety net behind the event feed: follows customer cancellations made on the backend
      * (which does not call back): every AWAITING_PICK shipment whose order is now CANCELLED becomes CANCELLED.
+     * The orders are read outside any transaction; each cancellation then locks and
+     * re-checks its shipment in its own short transaction.
      *
      * @return the number of shipments cancelled
      */
-    @Transactional
     public int reconcileCancellations() {
         List<ShipmentEntity> awaiting = shipmentRepository.findByStatus(ShipmentStatus.AWAITING_PICK,
                 PageRequest.of(0, RECONCILE_BATCH, Sort.by("id"))).getContent();
@@ -142,13 +164,17 @@ public class ShipmentService {
             if (order == null || order.fulfilmentState() != FulfilmentState.CANCELLED) {
                 continue;
             }
-            ShipmentEntity shipment = lock(candidate.getId());
-            if (shipment.getStatus() == ShipmentStatus.AWAITING_PICK && markCancelledIfOrderCancelled(shipment, order)) {
-                log.info("Shipment {} cancelled because order {} was cancelled", shipment.getId(), order.id());
+            if (Boolean.TRUE.equals(transaction.execute(status -> cancelIfAwaitingPick(candidate.getId(), order)))) {
+                log.info("Shipment {} cancelled because order {} was cancelled", candidate.getId(), order.id());
                 cancelled++;
             }
         }
         return cancelled;
+    }
+
+    private boolean cancelIfAwaitingPick(Long shipmentId, InternalOrderDto order) {
+        ShipmentEntity shipment = lock(shipmentId);
+        return shipment.getStatus() == ShipmentStatus.AWAITING_PICK && markCancelledIfOrderCancelled(shipment, order);
     }
 
     /**
@@ -228,7 +254,7 @@ public class ShipmentService {
         return toDto(find(id));
     }
 
-    @Transactional(readOnly = true)
+    /** Reads the shipment, then the order from the backend without holding a connection. */
     public PickListDto pickList(Long id) {
         ShipmentEntity shipment = find(id);
         InternalOrderDto order = backendClient.getOrder(shipment.getOrderId());
@@ -345,9 +371,8 @@ public class ShipmentService {
     /**
      * Customers may track their own orders and administrators any order. A
      * released order is answered from the local shipment; otherwise the
-     * backend decides whether the order exists for the caller.
+     * backend decides whether the order exists for the caller (outside any transaction).
      */
-    @Transactional(readOnly = true)
     public ShipmentDto trackOrder(Long orderId, String username, boolean admin) {
         Optional<ShipmentEntity> shipment = shipmentRepository.findByOrderId(orderId);
         if (shipment.isPresent()) {

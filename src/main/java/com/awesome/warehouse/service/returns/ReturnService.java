@@ -61,11 +61,10 @@ public class ReturnService {
     /**
      * Opens a return. Requests for the same order are serialised with a database
      * row lock, so concurrent requests cannot together return more units than were
-     * bought, whichever instance serves them.
+     * bought, whichever instance serves them. The order is read from the backend
+     * before the locking transaction starts, so no connection waits for that call.
      */
-    @Transactional
     public ReturnDto create(String username, Long orderId, CreateReturnDto request) {
-        orderLocks.lock(orderId);
         InternalOrderDto order = backendClient.getOrder(orderId);
         if (!order.username().equals(username)) {
             throw new CustomException("Order not found", HttpStatus.NOT_FOUND);
@@ -73,6 +72,11 @@ public class ReturnService {
         if (order.status() != OrderStatus.DELIVERED) {
             throw new CustomException("Only delivered orders can be returned", HttpStatus.CONFLICT);
         }
+        return orderLocks.callLocked(orderId, () -> createLocked(username, order, request));
+    }
+
+    private ReturnDto createLocked(String username, InternalOrderDto order, CreateReturnDto request) {
+        Long orderId = order.id();
         LocalDateTime deliveredAt = shipmentRepository.findByOrderId(orderId)
                 .map(ShipmentEntity::getDeliveredAt)
                 .orElse(order.updatedAt());

@@ -64,6 +64,7 @@ public class FakeBackend implements BackendClient {
     private volatile boolean refuseFulfilment;
     private volatile boolean loseNextFulfilmentResponse;
     private volatile boolean notificationsDown;
+    private volatile long latencyMillis;
 
     public void reset() {
         orders.clear();
@@ -80,6 +81,12 @@ public class FakeBackend implements BackendClient {
         refuseFulfilment = false;
         loseNextFulfilmentResponse = false;
         notificationsDown = false;
+        latencyMillis = 0;
+    }
+
+    /** Makes every call take this long, like a real backend over the network. */
+    public void setLatency(java.time.Duration latency) {
+        this.latencyMillis = latency.toMillis();
     }
 
     /** The next PUT fulfilment is applied, but the caller gets 503 as if the response timed out. */
@@ -376,6 +383,13 @@ public class FakeBackend implements BackendClient {
     }
 
     private void call(String description) {
+        if (latencyMillis > 0) {
+            try {
+                Thread.sleep(latencyMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         if (!available) {
             throw BackendErrorMapper.unavailable(new IllegalStateException("fake backend down"));
         }

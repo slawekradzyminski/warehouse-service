@@ -6,42 +6,56 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.util.function.Supplier;
 
 /**
  * Serialises return requests for the same order across every warehouse-service instance
  * with a database row lock. Orders live in the backend, so the lock is a row in
- * {@code order_locks}: it is created once (in its own transaction, so a concurrent creator
- * merely loses the insert) and then locked with {@code SELECT ... FOR UPDATE} until the
- * caller's transaction ends.
+ * {@code order_locks}: it is created once in its own short transaction (a concurrent creator
+ * merely loses the insert) and then locked with {@code SELECT ... FOR UPDATE} in the
+ * transaction that runs the caller's work. The row is created before that transaction
+ * starts, because creating it inside would need a second connection while the first one is
+ * held, which starves the pool under concurrent requests.
  */
 @Slf4j
 @Component
 public class OrderLocks {
 
     private final OrderLockRepository repository;
-    private final TransactionTemplate newTransaction;
+    private final TransactionTemplate transaction;
 
     public OrderLocks(OrderLockRepository repository, PlatformTransactionManager transactionManager) {
         this.repository = repository;
-        this.newTransaction = new TransactionTemplate(transactionManager);
-        this.newTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.transaction = new TransactionTemplate(transactionManager);
     }
 
-    /** Blocks until the caller's transaction holds the lock for this order. */
-    @Transactional(propagation = Propagation.MANDATORY)
-    public void lock(long orderId) {
-        if (repository.findForUpdate(orderId).isPresent()) {
-            return;
+    /**
+     * Runs {@code work} in a new transaction that holds this order's lock until it ends. Call it
+     * outside any transaction; the work's repository calls join the locking transaction.
+     */
+    public <T> T callLocked(long orderId, Supplier<T> work) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Order locks are taken in their own transaction");
         }
+        ensureExists(orderId);
+        return transaction.execute(status -> {
+            repository.findForUpdate(orderId).orElseThrow(() -> new IllegalStateException("Order lock row is missing"));
+            return work.get();
+        });
+    }
+
+    private void ensureExists(long orderId) {
         try {
-            newTransaction.executeWithoutResult(status -> repository.saveAndFlush(new OrderLockEntity(orderId)));
+            transaction.executeWithoutResult(status -> {
+                if (!repository.existsById(orderId)) {
+                    repository.saveAndFlush(new OrderLockEntity(orderId));
+                }
+            });
         } catch (DataIntegrityViolationException e) {
-            log.debug("Order {} lock row was created concurrently; waiting for it", orderId);
+            log.debug("Order {} lock row was created concurrently", orderId);
         }
-        repository.findForUpdate(orderId).orElseThrow(() -> new IllegalStateException("Order lock row is missing"));
     }
 }

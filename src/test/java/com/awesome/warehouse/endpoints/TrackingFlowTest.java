@@ -98,10 +98,10 @@ class TrackingFlowTest extends AbstractFlowTest {
         assertThat(entity.getLastActor()).isEqualTo("carrier");
         assertThat(backend.order(packed.getOrderId()).status()).isEqualTo(OrderStatus.DELIVERED);
         assertThat(backend.order(packed.getOrderId()).fulfilmentState()).isEqualTo(FulfilmentState.DELIVERED);
-        assertThat(backend.notifications()).extracting(NotificationRequest::template).containsExactly(
+        assertThat(sentNotifications()).extracting(NotificationRequest::template).containsExactly(
                 NotificationTemplate.ORDER_SHIPPED, NotificationTemplate.SHIPMENT_OUT_FOR_DELIVERY,
                 NotificationTemplate.ORDER_DELIVERED);
-        assertThat(backend.notifications().get(1)).satisfies(n -> {
+        assertThat(sentNotifications().get(1)).satisfies(n -> {
             assertThat(n.username()).isEqualTo("client");
             assertThat(n.properties()).isEqualTo(Map.of("orderId", String.valueOf(packed.getOrderId()),
                     "carrier", "DHL", "trackingNumber", DELIVERS_FIRST_TIME));
@@ -139,7 +139,7 @@ class TrackingFlowTest extends AbstractFlowTest {
                 TrackingStatus.DELIVERED);
         assertThat(delivered.getEvents().get(5).getDescription()).isEqualTo("Out for delivery again (second attempt)");
         assertThat(backend.order(packed.getOrderId()).status()).isEqualTo(OrderStatus.DELIVERED);
-        assertThat(backend.notifications()).extracting(NotificationRequest::template).containsExactly(
+        assertThat(sentNotifications()).extracting(NotificationRequest::template).containsExactly(
                 NotificationTemplate.ORDER_SHIPPED, NotificationTemplate.SHIPMENT_OUT_FOR_DELIVERY,
                 NotificationTemplate.SHIPMENT_DELIVERY_FAILED, NotificationTemplate.SHIPMENT_OUT_FOR_DELIVERY,
                 NotificationTemplate.ORDER_DELIVERED);
@@ -206,7 +206,7 @@ class TrackingFlowTest extends AbstractFlowTest {
                 .containsExactly(TrackingStatus.LABEL_CREATED, TrackingStatus.DELIVERED);
         assertThat(afterDelivery.getEvents().getLast().getDescription()).isEqualTo("Delivery confirmed by the warehouse");
         assertThat(afterDelivery.getEstimatedDelivery()).isEqualTo(delivered.as(ShipmentDto.class).getDeliveredAt());
-        assertThat(backend.notifications()).extracting(NotificationRequest::template)
+        assertThat(sentNotifications()).extracting(NotificationRequest::template)
                 .containsExactly(NotificationTemplate.ORDER_SHIPPED, NotificationTemplate.ORDER_DELIVERED);
     }
 

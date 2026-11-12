@@ -51,6 +51,7 @@ public abstract class AbstractFlowTest {
     @Autowired private com.awesome.warehouse.repository.returns.OrderLockRepository orderLocks;
     @Autowired private com.awesome.warehouse.repository.event.EventCursorRepository eventCursors;
     @Autowired private com.awesome.warehouse.repository.event.ProcessedEventRepository processedEvents;
+    @Autowired private com.awesome.warehouse.service.notification.NotificationDispatcher notificationDispatcher;
 
     @BeforeEach
     void resetBackend() {
@@ -59,6 +60,7 @@ public abstract class AbstractFlowTest {
 
     @AfterEach
     void cleanDatabase() {
+        awaitNotificationDispatch();
         receiptRepository.deleteAll();
         purchaseOrderRepository.deleteAll();
         supplierRepository.deleteAll();
@@ -68,6 +70,22 @@ public abstract class AbstractFlowTest {
         orderLocks.deleteAll();
         eventCursors.deleteAll();
         processedEvents.deleteAll();
+    }
+
+    /**
+     * Waits for the notification dispatches queued by the requests so far (they run on the
+     * dispatcher's own thread after each commit).
+     */
+    protected void awaitNotificationDispatch() {
+        if (!notificationDispatcher.awaitIdle(java.time.Duration.ofSeconds(10))) {
+            throw new IllegalStateException("Notification dispatch did not finish");
+        }
+    }
+
+    /** The notifications the backend accepted, once the queued dispatches have finished. */
+    protected java.util.List<com.awesome.warehouse.client.NotificationRequest> sentNotifications() {
+        awaitNotificationDispatch();
+        return backend.notifications();
     }
 
     protected Response getJson(String path, String token) {

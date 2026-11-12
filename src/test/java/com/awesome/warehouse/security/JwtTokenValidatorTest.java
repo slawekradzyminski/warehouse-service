@@ -118,6 +118,40 @@ class JwtTokenValidatorTest {
     }
 
     @Test
+    void concurrentFirstRequestsWaitForTheOneKeyFetchInsteadOfBeingRejected() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        FakeBackend backend = new FakeBackend() {
+            @Override
+            public JwkSet jwks() {
+                calls.incrementAndGet();
+                return super.jwks();
+            }
+        };
+        backend.setLatency(java.time.Duration.ofMillis(100));
+        JwtTokenValidator cold = new JwtTokenValidator(new BackendKeyLocator(backend, java.time.Duration.ofHours(1)));
+        String token = TestTokens.token("alice", "ROLE_CLIENT");
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(8);
+        try {
+            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+            List<java.util.concurrent.Future<String>> names = new java.util.ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                names.add(pool.submit(() -> {
+                    start.await();
+                    return cold.authenticate(token).getName();
+                }));
+            }
+            start.countDown();
+            for (java.util.concurrent.Future<String> name : names) {
+                assertThat(name.get(10, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo("alice");
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(calls.get()).isEqualTo(1);
+    }
+
+    @Test
     void anUnreachableBackendIsReportedAsUnavailable() {
         FakeBackend backend = new FakeBackend();
         backend.setAvailable(false);
