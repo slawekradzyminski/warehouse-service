@@ -66,7 +66,20 @@ commit, and retried every 30 seconds with exponential backoff (up to 10
 attempts) while the backend answers 503. Any other rejection is final. Each
 row carries a `requestId`, and the backend sends one email per `requestId`, so
 retries never duplicate emails. The notification carries only the template and
-its properties; the backend renders the text.
+its properties; the backend renders the text. The after-commit send runs on a
+single `notification-dispatch` thread, never on the committing request thread,
+so the request releases its connection without waiting for the backend.
+
+Connection budget: the pool has 3 connections, so a request never needs a
+second one while it holds one (no `REQUIRES_NEW` under an open transaction, no
+after-commit work on the request thread) and never waits on a lock or monitor
+while holding one, except for the shipment, return or purchase order row lock
+it took itself. Backend reads that need no lock (release snapshot, pick list,
+order tracking, reconciliation, the order of a new return) run outside
+transactions; only the backend mirror of a state transition runs while its
+row lock, and so its single connection, is held (bounded by the 10 s backend
+read timeout). `ConnectionPoolFlowTest` drives eight concurrent fulfilments
+and returns against a pool of 3.
 
 A customer may cancel an order on the backend; the backend never calls this
 service, so cancellations reach it through the **event feed** (see below)

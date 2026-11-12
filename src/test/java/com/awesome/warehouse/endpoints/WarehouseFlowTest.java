@@ -69,9 +69,9 @@ class WarehouseFlowTest extends AbstractFlowTest {
         assertThat(backend.order(order.id()).status()).isEqualTo(OrderStatus.DELIVERED);
         assertThat(backend.order(order.id()).fulfilmentState()).isEqualTo(FulfilmentState.DELIVERED);
         assertThat(tracked.getId()).isEqualTo(created.getId());
-        assertThat(backend.notifications()).extracting(NotificationRequest::template)
+        assertThat(sentNotifications()).extracting(NotificationRequest::template)
                 .containsExactly(NotificationTemplate.ORDER_SHIPPED, NotificationTemplate.ORDER_DELIVERED);
-        assertThat(backend.notifications().getFirst()).satisfies(n -> {
+        assertThat(sentNotifications().getFirst()).satisfies(n -> {
             assertThat(n.username()).isEqualTo("client");
             assertThat(n.properties()).containsEntry("orderId", String.valueOf(order.id()));
             assertThat(n.properties()).containsEntry("trackingNumber", "1Z999AA10123456784")
@@ -274,6 +274,7 @@ class WarehouseFlowTest extends AbstractFlowTest {
 
         ShipmentDto shipped = transition(shipment.getId(), "ship", new ShipShipmentDto(Carrier.DHL, "1234567890"))
                 .as(ShipmentDto.class);
+        awaitNotificationDispatch();
         var pending = outboxRepository.findAll();
         backend.setNotificationsDown(false);
         pending.forEach(row -> {
@@ -289,7 +290,7 @@ class WarehouseFlowTest extends AbstractFlowTest {
             assertThat(row.getLastError()).isEqualTo("503 Backend unavailable");
         });
         assertThat(sent).isEqualTo(1);
-        assertThat(backend.notifications()).singleElement().satisfies(n -> {
+        assertThat(sentNotifications()).singleElement().satisfies(n -> {
             assertThat(n.template()).isEqualTo(NotificationTemplate.ORDER_SHIPPED);
             assertThat(n.requestId()).isEqualTo(pending.getFirst().getRequestId());
         });

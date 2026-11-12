@@ -92,6 +92,7 @@ class CorrelationFlowTest extends AbstractFlowTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(jsonMapper.writeValueAsString(new ShipShipmentDto(Carrier.DHL, "1234567890"))),
                 warehouseToken, REQUEST_ID, TRACEPARENT);
+        awaitNotificationDispatch();
         NotificationOutboxEntity queued = outbox.findAll().getFirst();
         backend.setNotificationsDown(false);
         queued.setNextAttemptAt(LocalDateTime.now().minusSeconds(1));

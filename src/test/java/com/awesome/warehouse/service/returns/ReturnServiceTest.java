@@ -48,6 +48,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -72,6 +73,8 @@ class ReturnServiceTest {
         service = new ReturnService(returnRepository, shipmentRepository, backendClient, orderLocks, notificationOutbox,
                 Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC));
         lenient().when(returnRepository.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(orderLocks.callLocked(anyLong(), any()))
+                .thenAnswer(invocation -> invocation.<java.util.function.Supplier<?>>getArgument(1).get());
     }
 
     private static InternalOrderDto order(OrderStatus status, LocalDateTime updatedAt, String total, String subtotal,
@@ -125,6 +128,7 @@ class ReturnServiceTest {
                     assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.NOT_FOUND);
                     assertThat(e.getMessage()).isEqualTo("Order not found");
                 });
+        verify(orderLocks, never()).callLocked(anyLong(), any());
     }
 
     @ParameterizedTest

@@ -20,8 +20,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Resolves the RS256 verification key of a backend access token by its {@code kid} from the
@@ -29,6 +29,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * (the backend rotated its key, or restarted with an ephemeral one) triggers a refetch, at
  * most once per {@code security.jwt.jwks-refresh-interval}, so forged kids cannot flood the
  * backend. Only RS256 is accepted, which also rules out HMAC key-confusion tokens.
+ *
+ * <p>Concurrent requests with an unknown {@code kid} (for example the first burst after a
+ * start) wait for the one refetch in flight instead of failing with 401, and a refetch
+ * swaps the whole key map at once, so known keys never disappear while it runs.
  */
 @Slf4j
 @Component
@@ -39,7 +43,7 @@ public class BackendKeyLocator extends LocatorAdapter<Key> {
     private final BackendClient backendClient;
     private final Duration refreshInterval;
     private final Clock clock;
-    private final Map<String, PublicKey> keys = new ConcurrentHashMap<>();
+    private volatile Map<String, PublicKey> keys = Map.of();
     private volatile Instant lastRefresh = Instant.EPOCH;
 
     @Autowired
@@ -65,9 +69,8 @@ public class BackendKeyLocator extends LocatorAdapter<Key> {
             throw new InvalidKeyException("Access token has no key id");
         }
         PublicKey key = keys.get(kid);
-        if (key == null && refreshAllowed()) {
-            refresh();
-            key = keys.get(kid);
+        if (key == null) {
+            key = refreshFor(kid);
         }
         if (key == null) {
             throw new InvalidKeyException("Unknown key id");
@@ -75,7 +78,21 @@ public class BackendKeyLocator extends LocatorAdapter<Key> {
         return key;
     }
 
-    private synchronized boolean refreshAllowed() {
+    /**
+     * Refetches the keys for an unknown kid, one thread at a time: a thread that waited for
+     * another one's refetch finds the key without fetching again. Runs in the security
+     * filter, where no database connection is held.
+     */
+    private synchronized PublicKey refreshFor(String kid) {
+        PublicKey key = keys.get(kid);
+        if (key == null && refreshAllowed()) {
+            refresh();
+            key = keys.get(kid);
+        }
+        return key;
+    }
+
+    private boolean refreshAllowed() {
         Instant now = clock.instant();
         if (now.isBefore(lastRefresh.plus(refreshInterval))) {
             return false;
@@ -87,14 +104,13 @@ public class BackendKeyLocator extends LocatorAdapter<Key> {
     /** Replaces the cache with the backend's current keys; a backend outage propagates as 503. */
     private void refresh() {
         JwkSet set = backendClient.jwks();
-        Map<String, PublicKey> fresh = new ConcurrentHashMap<>();
+        Map<String, PublicKey> fresh = new HashMap<>();
         for (JwkSet.Jwk jwk : set.keys()) {
             if ("RSA".equals(jwk.kty()) && jwk.kid() != null && (jwk.alg() == null || ALGORITHM.equals(jwk.alg()))) {
                 fresh.put(jwk.kid(), rsaKey(jwk));
             }
         }
-        keys.clear();
-        keys.putAll(fresh);
+        keys = Map.copyOf(fresh);
         log.info("Loaded {} access-token verification key(s) from the backend", fresh.size());
     }
 

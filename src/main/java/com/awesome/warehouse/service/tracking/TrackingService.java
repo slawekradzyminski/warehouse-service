@@ -123,7 +123,7 @@ public class TrackingService {
         return true;
     }
 
-    @Transactional(readOnly = true)
+    /** Not transactional: the shipment lookup may ask the backend, which must not hold a connection. */
     public TrackingDto trackOrder(Long orderId, String username, boolean admin) {
         ShipmentDto shipment = shipmentService.trackOrder(orderId, username, admin);
         return tracking(find(shipment.getId()));

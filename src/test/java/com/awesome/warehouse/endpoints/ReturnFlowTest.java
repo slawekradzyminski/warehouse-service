@@ -67,9 +67,9 @@ class ReturnFlowTest extends AbstractFlowTest {
         });
         assertThat(refunded.getStatus()).isEqualTo(ReturnStatus.REFUNDED);
         assertThat(refunded.getRefundAmount()).isEqualByComparingTo("108.00");
-        assertThat(backend.notifications()).extracting(n -> n.properties().get("status"))
+        assertThat(sentNotifications()).extracting(n -> n.properties().get("status"))
                 .containsExactly("APPROVED", "REFUNDED");
-        assertThat(backend.notifications().getLast().properties())
+        assertThat(sentNotifications().getLast().properties())
                 .containsEntry("returnId", String.valueOf(requested.getId()))
                 .containsEntry("orderId", String.valueOf(order.id()))
                 .containsEntry("refundAmount", "108.00");

@@ -11,7 +11,7 @@
 
     <groupId>com.awesome</groupId>
     <artifactId>warehouse-service</artifactId>
-    <version>1.4.0</version>
+    <version>1.4.1</version>
     <packaging>jar</packaging>
 
     <name>warehouse-service</name>
