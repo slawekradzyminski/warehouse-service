@@ -1,5 +1,6 @@
 package com.awesome.warehouse.service.tracking;
 
+import com.awesome.warehouse.correlation.TracingSupport;
 import com.awesome.warehouse.controller.exception.CustomException;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -28,9 +29,9 @@ class CarrierSimulatorTest {
         when(trackingService.idleSimulatedShipments(NOW)).thenReturn(List.of(1L));
         when(trackingService.advanceIfIdle(1L, NOW)).thenReturn(true);
 
-        new CarrierSimulator(trackingService, CLOCK, false).scheduledStep();
+        new CarrierSimulator(trackingService, CLOCK, TracingSupport.disabled(), false).scheduledStep();
         verify(trackingService, never()).idleSimulatedShipments(any());
-        new CarrierSimulator(trackingService, CLOCK, true).scheduledStep();
+        new CarrierSimulator(trackingService, CLOCK, TracingSupport.disabled(), true).scheduledStep();
         verify(trackingService).advanceIfIdle(1L, NOW);
     }
 
@@ -42,7 +43,7 @@ class CarrierSimulatorTest {
             assertThat(org.slf4j.MDC.get("traceId")).matches("[0-9a-f]{32}");
             return List.of();
         });
-        CarrierSimulator simulator = new CarrierSimulator(trackingService, CLOCK, true);
+        CarrierSimulator simulator = new CarrierSimulator(trackingService, CLOCK, TracingSupport.disabled(), true);
 
         simulator.scheduledStep();
         simulator.scheduledStep();
@@ -59,7 +60,7 @@ class CarrierSimulatorTest {
         when(trackingService.advanceIfIdle(3L, NOW)).thenThrow(new CustomException("conflict", HttpStatus.CONFLICT));
         when(trackingService.advanceIfIdle(4L, NOW)).thenReturn(true);
 
-        assertThat(new CarrierSimulator(trackingService, CLOCK, true).advanceIdle(NOW)).isEqualTo(2);
+        assertThat(new CarrierSimulator(trackingService, CLOCK, TracingSupport.disabled(), true).advanceIdle(NOW)).isEqualTo(2);
     }
 
     @Test
@@ -69,7 +70,7 @@ class CarrierSimulatorTest {
         when(trackingService.advanceIfIdle(2L, NOW))
                 .thenThrow(new CustomException("Backend unavailable", HttpStatus.SERVICE_UNAVAILABLE));
 
-        assertThat(new CarrierSimulator(trackingService, CLOCK, true).advanceIdle(NOW)).isEqualTo(1);
+        assertThat(new CarrierSimulator(trackingService, CLOCK, TracingSupport.disabled(), true).advanceIdle(NOW)).isEqualTo(1);
         verify(trackingService, never()).advanceIfIdle(3L, NOW);
     }
 }

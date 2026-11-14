@@ -14,6 +14,7 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import java.util.List;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,7 +32,8 @@ public class OrderShipmentController {
     private final TrackingService trackingService;
 
     @GetMapping("/api/v1/orders/{id}/shipment")
-    @Operation(summary = "Track order shipment", description = "Returns the shipment for one of the caller's orders. Administrators may track any order.")
+    @Operation(summary = "Track order shipment", description = "Returns the first parcel of one of the caller's orders, with "
+            + "locationCode and parcelCount; GET /api/v1/orders/{id}/shipments lists every parcel. Administrators may track any order.")
     @ApiResponse(responseCode = "200", description = "Shipment returned")
     @ApiResponse(responseCode = "401", description = "Unauthorized",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
@@ -43,8 +45,23 @@ public class OrderShipmentController {
         return shipmentService.trackOrder(id, principal.username(), principal.isAdmin());
     }
 
+    @GetMapping("/api/v1/orders/{id}/shipments")
+    @Operation(summary = "List order parcels", description = "Returns every parcel of one of the caller's orders, oldest first, "
+            + "each with its location, lines and tracking number. Empty while the order is not released to the warehouse. "
+            + "Administrators may list any order.")
+    @ApiResponse(responseCode = "200", description = "Parcels returned")
+    @ApiResponse(responseCode = "401", description = "Unauthorized",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    @ApiResponse(responseCode = "404", description = "Order not found",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    public List<ShipmentDto> parcels(
+            @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
+            @PathVariable Long id) {
+        return shipmentService.orderShipments(id, principal.username(), principal.isAdmin());
+    }
+
     @GetMapping("/api/v1/orders/{id}/shipment/tracking")
-    @Operation(summary = "Track order parcel", description = "Returns the carrier tracking (scans, current status, estimated delivery) "
+    @Operation(summary = "Track order parcel", description = "Returns the carrier tracking of the order's first parcel (scans, current status, estimated delivery) "
             + "for one of the caller's orders. Administrators may track any order. Before the hand-over to the carrier the events are empty.")
     @ApiResponse(responseCode = "200", description = "Tracking returned")
     @ApiResponse(responseCode = "401", description = "Unauthorized",

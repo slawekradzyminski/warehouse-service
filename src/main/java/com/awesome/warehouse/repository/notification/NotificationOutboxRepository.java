@@ -18,4 +18,10 @@ public interface NotificationOutboxRepository extends JpaRepository<Notification
             order by n.id""")
     List<NotificationOutboxEntity> findDue(@Param("now") LocalDateTime now, @Param("maxAttempts") int maxAttempts,
                                            Pageable pageable);
+
+    /** Pending rows: not sent and fewer than {@code maxAttempts} attempts (ADR 3 row state). */
+    @Query("""
+            select count(n) from NotificationOutboxEntity n
+            where n.sentAt is null and n.attempts < :maxAttempts""")
+    long countPending(@Param("maxAttempts") int maxAttempts);
 }

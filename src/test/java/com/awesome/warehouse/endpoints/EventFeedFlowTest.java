@@ -191,7 +191,7 @@ class EventFeedFlowTest extends AbstractFlowTest {
         int handled = poller.poll();
 
         assertThat(handled).isEqualTo(1);
-        assertThat(shipmentRepository.findByOrderId(neverReleased.id())).isEmpty();
+        assertThat(shipmentRepository.findByOrderIdOrderByIdAsc(neverReleased.id())).isEmpty();
         assertThat(poller.cursor()).isEqualTo(1);
         assertThat(processedEvents.count()).isEqualTo(1);
     }

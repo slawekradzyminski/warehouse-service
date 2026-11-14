@@ -1,6 +1,7 @@
 package com.awesome.warehouse.service.notification;
 
 import com.awesome.warehouse.correlation.CorrelationContext;
+import com.awesome.warehouse.correlation.TracingSupport;
 import com.awesome.warehouse.entity.notification.NotificationOutboxEntity;
 import com.awesome.warehouse.repository.notification.NotificationOutboxRepository;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +30,7 @@ public class NotificationOutbox {
     private final NotificationOutboxRepository repository;
     private final ApplicationEventPublisher eventPublisher;
     private final Clock warehouseClock;
+    private final TracingSupport tracing;
 
     /** Published after an enqueue; the dispatcher sends right after the commit. */
     public record Enqueued() {
@@ -48,7 +50,7 @@ public class NotificationOutbox {
                 .nextAttemptAt(now)
                 .createdAt(now)
                 .correlationId(correlation.map(CorrelationContext::requestId).orElse(null))
-                .traceparent(correlation.map(CorrelationContext::traceparent).orElse(null))
+                .traceparent(tracing.currentTraceparent().orElse(null))
                 .build());
         eventPublisher.publishEvent(new Enqueued());
     }

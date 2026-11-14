@@ -68,7 +68,8 @@ class EventFeedPollerTest {
     }
 
     private EventFeedPoller poller(boolean enabled) {
-        return new EventFeedPoller(backend, shipments, cursors, processed, transactions, CLOCK, enabled);
+        return new EventFeedPoller(backend, shipments, cursors, processed, transactions, CLOCK,
+                com.awesome.warehouse.correlation.TracingSupport.disabled(), enabled);
     }
 
     private static FeedEvent event(long sequence, String type, Long orderId) {
@@ -126,7 +127,6 @@ class EventFeedPollerTest {
             assertThat(org.slf4j.MDC.get("requestId")).isEqualTo(run.requestId());
             assertThat(org.slf4j.MDC.get("spanId")).isEqualTo(run.spanId());
         });
-        assertThat(EventFeedPoller.correlationOf(event).requestId()).isEqualTo("cancel-7");
     }
 
     @Test

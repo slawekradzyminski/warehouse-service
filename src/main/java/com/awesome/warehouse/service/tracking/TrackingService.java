@@ -206,9 +206,9 @@ public class TrackingService {
         return eventRepository.findByShipmentIdOrderByIdAsc(shipmentId);
     }
 
+    /** The order lock first, then the parcel row: the order every fulfilment write takes them in. */
     private ShipmentEntity lock(Long id) {
-        return shipmentRepository.findByIdForUpdate(id)
-                .orElseThrow(() -> new CustomException("Shipment not found", HttpStatus.NOT_FOUND));
+        return shipmentService.lockForUpdate(id);
     }
 
     private ShipmentEntity find(Long id) {

@@ -156,4 +156,37 @@ class CorrelationContextTest {
         MDC.remove("requestId");
         assertThat(CorrelationContext.current()).isEmpty();
     }
+
+    @Test
+    void aTraceparentIsParsedIntoTraceIdSpanIdAndTheSampledFlag() {
+        assertThat(CorrelationContext.Traceparent.parse("00-" + TRACE_ID + "-00f067aa0ba902b7-01"))
+                .contains(new CorrelationContext.Traceparent(TRACE_ID, "00f067aa0ba902b7", true));
+        assertThat(CorrelationContext.Traceparent.parse("00-" + TRACE_ID + "-00f067aa0ba902b7-00"))
+                .hasValueSatisfying(parent -> {
+                    assertThat(parent.sampled()).isFalse();
+                    assertThat(parent.value()).isEqualTo("00-" + TRACE_ID + "-00f067aa0ba902b7-00");
+                });
+        assertThat(CorrelationContext.Traceparent.parse("00-" + TRACE_ID + "-00f067aa0ba902b7-03"))
+                .hasValueSatisfying(parent -> assertThat(parent.sampled()).isTrue());
+        assertThat(CorrelationContext.Traceparent.parse("00-" + TRACE_ID + "-00f067aa0ba902b7-02"))
+                .hasValueSatisfying(parent -> assertThat(parent.sampled()).isFalse());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+        "00-00000000000000000000000000000000-00f067aa0ba902b7-01", "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01"})
+    void invalidTraceparentsAreNotParsed(String traceparent) {
+        assertThat(CorrelationContext.Traceparent.parse(traceparent)).isEmpty();
+    }
+
+    @Test
+    void aSpanIdIsSixteenLowercaseHexDigitsAndNotZero() {
+        assertThat(CorrelationContext.validSpanId("00f067aa0ba902b7")).contains("00f067aa0ba902b7");
+        assertThat(CorrelationContext.validSpanId("0000000000000000")).isEmpty();
+        assertThat(CorrelationContext.validSpanId("00F067AA0BA902B7")).isEmpty();
+        assertThat(CorrelationContext.validSpanId("00f067aa0ba902b")).isEmpty();
+        assertThat(CorrelationContext.validSpanId(null)).isEmpty();
+    }
 }

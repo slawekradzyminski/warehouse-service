@@ -1,7 +1,7 @@
 package com.awesome.warehouse.service.tracking;
 
 import com.awesome.warehouse.controller.exception.CustomException;
-import com.awesome.warehouse.correlation.CorrelationContext;
+import com.awesome.warehouse.correlation.TracingSupport;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -16,6 +16,9 @@ import java.time.LocalDateTime;
  * simulated SHIPPED shipment (up to {@link TrackingService#BATCH_SIZE} per run) by one
  * scan, each in its own transaction. A backend outage ends the run; the shipment that
  * hit it is retried on the next run.
+ *
+ * <p>With tracing on every run is a root span (Spring's scheduled-task observation); its
+ * correlation ids are that span's, so the logs and the backend calls of a step share its trace.
  */
 @Slf4j
 @Component
@@ -23,12 +26,14 @@ public class CarrierSimulator {
 
     private final TrackingService trackingService;
     private final Clock warehouseClock;
+    private final TracingSupport tracing;
     private final boolean enabled;
 
-    public CarrierSimulator(TrackingService trackingService, Clock warehouseClock,
+    public CarrierSimulator(TrackingService trackingService, Clock warehouseClock, TracingSupport tracing,
                             @Value("${warehouse.carrier.enabled:true}") boolean enabled) {
         this.trackingService = trackingService;
         this.warehouseClock = warehouseClock;
+        this.tracing = tracing;
         this.enabled = enabled;
     }
 
@@ -37,7 +42,7 @@ public class CarrierSimulator {
     public void scheduledStep() {
         if (enabled) {
             // Each run is its own unit of work in the logs and in the backend calls it makes.
-            CorrelationContext.generate().run(() -> advanceIdle(LocalDateTime.now(warehouseClock)));
+            tracing.forJob().run(() -> advanceIdle(LocalDateTime.now(warehouseClock)));
         }
     }
 

@@ -29,7 +29,13 @@ public class RestBackendClient implements BackendClient {
 
     private final RestClient restClient;
 
+    /** Tracing off: the correlation interceptor adds a hand-built child {@code traceparent}. */
     public RestBackendClient(RestClient.Builder builder, String baseUrl, String serviceToken) {
+        this(builder, baseUrl, serviceToken, new CorrelationInterceptor());
+    }
+
+    public RestBackendClient(RestClient.Builder builder, String baseUrl, String serviceToken,
+                             CorrelationInterceptor correlation) {
         if (serviceToken == null || serviceToken.isBlank()) {
             throw new IllegalStateException("warehouse.service-token must be configured");
         }
@@ -37,8 +43,9 @@ public class RestBackendClient implements BackendClient {
                 .baseUrl(baseUrl)
                 .defaultHeader(SERVICE_TOKEN_HEADER, serviceToken)
                 .defaultHeader("Accept", MediaType.APPLICATION_JSON_VALUE)
-                // X-Request-Id and a child traceparent of the current request, event or job.
-                .requestInterceptor(new CorrelationInterceptor())
+                // X-Request-Id of the current request, event or job; the traceparent comes from the
+                // instrumented client with tracing on, from the interceptor with tracing off.
+                .requestInterceptor(correlation)
                 .defaultStatusHandler(HttpStatusCode::isError, (request, response) -> {
                     throw BackendErrorMapper.fromResponse(
                             response.getStatusCode(), StreamUtils.copyToByteArray(response.getBody()));

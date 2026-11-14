@@ -15,8 +15,8 @@ Paths and bodies are identical to the backend's former endpoints:
 
 | Path | Roles |
 | --- | --- |
-| `/api/v1/warehouse/**` (queue, shipments, pick list, pick/pack/ship/deliver/cancel) | `ROLE_WAREHOUSE`, `ROLE_ADMIN` |
-| `GET /api/v1/orders/{id}/shipment`, `GET /api/v1/orders/{id}/shipment/tracking` | owner, or `ROLE_ADMIN` for any order |
+| `/api/v1/warehouse/**` (queue, shipments, pick list, pick/pack/ship/deliver/cancel, locations, reallocate, short-pick, reconciliation) | `ROLE_WAREHOUSE`, `ROLE_ADMIN` |
+| `GET /api/v1/orders/{id}/shipment`, `GET /api/v1/orders/{id}/shipments`, `GET /api/v1/orders/{id}/shipment/tracking` | owner, or `ROLE_ADMIN` for any order |
 | `GET /api/v1/tracking/{trackingNumber}` | public (no token) |
 | `POST /api/v1/orders/{orderId}/returns`, `GET /api/v1/returns`, `GET /api/v1/returns/{id}` | any authenticated user, own orders only |
 | `/api/v1/admin/returns/**`, `/api/v1/admin/suppliers`, `/api/v1/admin/purchase-orders/**`, `GET /api/v1/admin/inventory/reorder-suggestions` | `ROLE_ADMIN` |
@@ -36,18 +36,22 @@ key is not cached yet, requests get 503.
 `backend.base-url` with `X-Service-Token`. Writes follow "validate locally, call
 the backend, then persist", so a failed backend call leaves no local change:
 
-- create shipment: `GET order` → save shipment → `PUT fulfilment AWAITING_PICK`
-  (the shipment row is removed again if the backend refuses). The backend
+- create shipment: `GET order` → allocate the lines to locations → save one
+  parcel per location → `PUT fulfilment AWAITING_PICK` (the parcels are rolled
+  back if the backend refuses; see "Warehouse locations and split shipments"). The backend
   accepts a repeated `AWAITING_PICK`, so a release whose response was lost
   is recovered: on 503 the order is read again and the shipment is kept if
   the release reached the backend, and an order already `AWAITING_PICK`
   without a shipment can be released again (it is adopted);
-- pick/pack/ship/deliver: `PUT fulfilment` first; ship/deliver then queue an
-  `ORDER_SHIPPED`/`ORDER_DELIVERED` notification (and record a tracking scan,
-  see "Shipment tracking");
-- cancel: `POST warehouse-cancel`, then the shipment becomes `CANCELLED` (also
-  when the backend reports the order as already cancelled, so a retried
-  cancel succeeds);
+- pick/pack/ship/deliver of a parcel: `PUT fulfilment` with the order's
+  aggregate state, only when it moves forward (one call per step); ship then
+  queues an `ORDER_SHIPPED` notification for the parcel, and the delivery of
+  the order's last parcel an `ORDER_DELIVERED` one (and each records a
+  tracking scan, see "Shipment tracking");
+- cancel: `POST warehouse-cancel`, then every `AWAITING_PICK` or `PICKED`
+  parcel of the order becomes `CANCELLED` (also when the backend reports the
+  order as already cancelled, so a retried cancel succeeds); refused with 409
+  while another parcel of the order is `PACKED` or later;
 - receive return: `POST inventory/receipts` (`RETURN_RESTOCKED`,
   `requestId = UUID.nameUUIDFromBytes("return-" + id)`) for resellable lines;
 - refund return: `POST orders/{id}/refunds` with the proportional amount
@@ -84,13 +88,14 @@ and returns against a pool of 3.
 A customer may cancel an order on the backend; the backend never calls this
 service, so cancellations reach it through the **event feed** (see below)
 within seconds. `ShipmentReconciler` stays as a safety net and runs every ten
-minutes: it cancels `AWAITING_PICK` shipments whose order is `CANCELLED`
-(`lastActor = "system"`) and adopts orders the backend reports as
-`AWAITING_PICK` without a shipment (older than two minutes, so in-flight
-releases are left alone). Between runs, reading the shipment
-(`GET /api/v1/warehouse/shipments/{id}`) or a refused transition reconciles it
-immediately, and the transition answers 409 "Order was cancelled by the
-customer".
+minutes: for orders with an `AWAITING_PICK` parcel whose order is `CANCELLED`
+it cancels the unpacked parcels (`lastActor = "system"`), it adopts orders the
+backend reports as `AWAITING_PICK` without a shipment (older than two minutes,
+so in-flight releases are left alone; the parcels are allocated as on release
+and the backend is not called), and it fills the lines of up to 100 shipments
+created before 1.5.0. Between runs, a refused transition reconciles the order
+immediately and answers 409 "Order was cancelled by the customer"; reads never
+change a shipment's state.
 
 ### Event feed
 
@@ -101,9 +106,8 @@ answers `{events: [{sequence, id, type, occurredAt, orderId, username, data}],
 nextCursor, hasMore}` ordered by `sequence`. A run follows `hasMore` for up to
 ten pages.
 
-- `order.cancelled`: the order's shipment becomes `CANCELLED`
-  (`lastActor = "system"`, `cancelledAt` set) when it is `AWAITING_PICK` or
-  `PICKED`. The backend is not called, because the order is already cancelled
+- `order.cancelled`: every parcel of the order that is `AWAITING_PICK` or
+  `PICKED` becomes `CANCELLED` (`lastActor = "system"`, `cancelledAt` set). The backend is not called, because the order is already cancelled
   there. `PACKED` and `SHIPPED` shipments are left alone and logged (the
   backend refuses those cancellations); finished shipments and orders without
   a shipment are ignored. A warehouse cancellation echoed by the feed is a no-op.
@@ -121,20 +125,25 @@ The feed needs backend 3.16.0 or later. Against an older backend the request
 answers 404, which is logged on every run; the reconciler still cancels
 shipments, only later.
 
-Return requests for the same order are serialised with a database row lock
-(`order_locks`, `SELECT ... FOR UPDATE`), so the returnable-quantity check holds
-across several instances.
+Return requests and every fulfilment write for the same order are serialised
+with a database row lock (`order_locks`, `SELECT ... FOR UPDATE`), so the
+returnable-quantity check and the aggregate fulfilment state hold across
+several instances.
 
-Local tables (Flyway `V1`–`V5`, schema `warehouse`): `shipments` (order id, owner and
-unit count snapshot, `simulated` flag), `tracking_events` (carrier scans), `return_requests` (order id plus order total/subtotal
+Local tables (Flyway `V1`–`V6`, schema `warehouse`): `shipments` (one parcel per
+order and location: order id, owner, `location_code`, parcel unit count,
+`simulated` flag), `shipment_lines` (product id, name, category and quantity per
+parcel), `warehouse_locations`, `location_products` (category stocking),
+`tracking_events` (carrier scans), `return_requests` (order id plus order total/subtotal
 snapshot for the proportional refund), `return_items` (product id, name and
 unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
-(product id and name snapshot), `purchase_receipts`, `notification_outbox` (with the enqueuing request's `correlation_id` and `traceparent`), `order_locks`,
+(product id and name snapshot), `purchase_receipts`, `notification_outbox` (with the enqueuing request's `correlation_id` and `traceparent`), `order_locks` (with the fulfilment state last mirrored to the backend),
 `event_cursors` (last feed sequence per consumer) and `processed_events` (handled feed event ids).
 
 ## Correlation IDs and logging
 
-- `CorrelationFilter` runs before every other filter. It keeps a valid incoming
+- `CorrelationFilter` runs right after Spring's server observation filter and
+  before every other filter (Spring Security included). It keeps a valid incoming
   `X-Request-Id` (1–128 characters of `[A-Za-z0-9._-]`) and the trace id of a
   valid W3C `traceparent` (`00-<32 hex>-<16 hex>-<2 hex>`, ids not all zeros);
   anything missing or invalid is generated (a UUID request id, a random trace
@@ -152,10 +161,166 @@ unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
   caused it, also on a retry. Rows from before 1.4.0 get fresh ids.
 - Scheduled jobs (event poll, reconciler, carrier simulator, notification
   retries) run each tick under a generated request and trace id.
+- With tracing on (below) the trace and span id in the MDC are those of the
+  current span; the request id is unchanged.
+
+## Tracing
+
+OpenTelemetry tracing through Micrometer Tracing (OTel bridge, OTLP HTTP
+exporter), compiled into the native image and **off by default**. Contract:
+`localstack-lab/docs/DISTRIBUTED_LAB_CONTRACTS.md`, section 4.
+
+| Variable | Property | Default |
+| --- | --- | --- |
+| `TRACING_ENABLED` | `warehouse.tracing.enabled` | `false`: nothing sampled, nothing exported |
+| `TRACING_OTLP_ENDPOINT` | `management.opentelemetry.tracing.export.otlp.endpoint` | `http://jaeger:4318/v1/traces` |
+| `TRACING_SAMPLING_PROBABILITY` | `management.tracing.sampling.probability` | `1.0` (new traces only; used only when enabled) |
+
+Service name: `warehouse-service` (`spring.application.name`). Propagation: W3C
+`traceparent` only (no baggage).
+
+- **Why not `management.tracing.export.enabled`:** Spring Boot's switch is a bean
+  condition, and Spring AOT fixes bean conditions when the native image is
+  built. The tracing beans are therefore always present and
+  `warehouse.tracing.enabled` is read at runtime (`TracingConfig`): off, the
+  sampler is `AlwaysOff`; on, it is parent-based with the probability above
+  for new traces. The same image runs either way.
+- **Dependencies:** `spring-boot-micrometer-tracing-opentelemetry`,
+  `micrometer-tracing-bridge-otel` and `opentelemetry-exporter-otlp` with the
+  JDK HTTP sender instead of OkHttp: the tracing half of
+  `spring-boot-starter-opentelemetry` without its OTLP metrics registry
+  (metrics stay on the Prometheus scrape) and without OkHttp/Kotlin in the
+  image.
+- **Server spans** are parented by a valid incoming `traceparent` (the gateway
+  always sends one), so the trace id in the logs and in the backend's
+  `domain_events.trace_id` is the exported one.
+- **Backend calls:** with tracing on the instrumented `RestClient` sends the
+  `traceparent` of its client span; the hand-built child `traceparent` is only
+  sent with tracing off. `X-Request-Id` is unchanged.
+- **Event feed:** each event is handled in a `CONSUMER` span
+  `process <type>` whose parent is the event's `traceId`/`spanId` (backend
+  3.21.0). Without a `spanId` the span starts a new trace and records the
+  event's trace id as the attribute `event.trace_id`.
+- **Notification outbox:** the stored `traceparent` is the span current at
+  enqueue time; each delivery is a `PRODUCER` span `send <TEMPLATE>` parented
+  by it.
+- **Scheduled jobs:** carrier steps and reconciler runs are root spans
+  (Spring's scheduled-task observation). The event poll and notification
+  retry runs are not recorded, so an idle feed adds no trace every 5 seconds;
+  the event and delivery spans inside them are.
+- `SMOKE_TRACING=true scripts/native-smoke.sh <image>` runs the native smoke
+  test with tracing on and checks the OTLP export (tracing off it checks that
+  nothing is exported).
+- Micrometer's MDC listener is silenced; the correlation code owns the
+  `traceId`/`spanId` MDC keys in both modes.
+
+## Outbox metrics
+
+On `/actuator/prometheus`, following the outbox convention of
+`awesome-localstack/docs/ARCHITECTURE_DECISIONS.md` (ADR 3):
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `warehouse_outbox_pending` | gauge | `notification_outbox` rows with `sent_at` null and `attempts` below 10, counted on each scrape (one indexed `count(*)`) |
+| `warehouse_outbox_failed_total` | counter | rows given up by this instance since it started (final rejection or tenth failed attempt) |
 - Logs: the default console lines include `[traceId,requestId]`.
   `LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs` (what the server Compose sets)
   writes one ECS JSON object per line with `requestId`, `traceId` and `spanId`
   as fields; it works in the native image (`scripts/native-smoke.sh` checks it).
+
+## Warehouse locations and split shipments
+
+Orders ship from several locations (Flyway `V6`). `warehouse_locations` holds
+`KRK` "Krakow Central" (priority 1) and `GDN` "Gdansk North" (priority 2);
+lower numbers are preferred. `location_products(location_code, category, role)`
+says which categories a location stocks, as `PRIMARY` or `BACKUP`; the category
+`*` matches every category without its own row at that location, so products
+created later in the backend are still stocked. The migration seeds `KRK *
+PRIMARY` and `GDN * BACKUP` (everything ships from Krakow). The `local` and
+`demo` profiles add the demo split: `GDN` is `PRIMARY` and `KRK` `BACKUP` for
+`Books`, `Home & Kitchen` and `Wearables`, so a cart mixing them with, for
+example, `Electronics` is shipped in two parcels.
+
+**Allocation** (on release and adoption, `ShipmentAllocator`): the order's items
+are merged by product. A line's tier is `PRIMARY` if an active location stocks
+its category as `PRIMARY`, otherwise `BACKUP`; if no active location stocks it,
+the release fails with 409 `No active warehouse location stocks <category>` and
+nothing is written. When one active location stocks every line in that line's
+tier, the highest-ranked such location (priority, then code) takes the whole
+order; otherwise each line goes to the highest-ranked active location stocking
+it in its tier. One `AWAITING_PICK` parcel is written per location with its
+`shipment_lines`; `unique(order_id, location_code)` replaces `unique(order_id)`.
+`POST /api/v1/warehouse/shipments` returns the first parcel with `parcelCount`.
+
+**Backend mirror** (`FulfilmentAggregate`): the backend keeps one fulfilment
+state per order and is unchanged. The aggregate of the order's parcels is
+`AWAITING_PICK` while every non-cancelled parcel awaits pick, otherwise
+`max(PICKED, min over non-cancelled parcels)`. The state sent is
+`max(last mirrored, aggregate)` (`order_locks.mirrored_state`), so the backend
+only moves forward, one `PUT fulfilment` per step, and only when the state
+changes: the first pick of a split order makes it `PICKED` (customer
+cancellation is closed from then on), it is `SHIPPED` (order status `SHIPPED`)
+once every parcel has shipped and `DELIVERED` with the last delivery. The
+backend's cancel/ship race keeps a single decider: a refused step whose order
+turns out `CANCELLED` cancels every unpacked parcel of the order and answers
+409 "Order was cancelled by the customer".
+
+**Locking**: every write to an order's parcels (transitions, cancel, the
+event feed, the reconciler, adoption, release, reallocate, short-pick, the
+carrier simulator, filling legacy lines) locks the order's `order_locks` row
+first, then the parcel row. The aggregate is therefore computed and mirrored by
+one writer per order at a time, and a release and an adoption of the same
+order create its parcels once. `MultiWarehouseConcurrencyFlowTest` races two
+packers, two pickers, a pick against a customer cancellation, and a release
+against an adoption.
+
+| Endpoint | Access | Response |
+| --- | --- | --- |
+| `GET /api/v1/orders/{id}/shipments` | owner, `ROLE_ADMIN` | every parcel, oldest first; `[]` before release; 404 "Order not found" |
+| `GET /api/v1/orders/{id}/shipment` | owner, `ROLE_ADMIN` | the first parcel (same shape plus the fields below) |
+| `GET /api/v1/warehouse/locations` | `ROLE_WAREHOUSE`, `ROLE_ADMIN` | `[{code, name, city, active, priority, primaryCategories, backupCategories}]` |
+| `PUT /api/v1/warehouse/locations/{code}` `{active}` | `ROLE_WAREHOUSE`, `ROLE_ADMIN` | the location; 400 without `active`; 404 unknown code. Existing parcels stay. |
+| `POST /api/v1/warehouse/shipments/{id}/reallocate` `{targetLocation?}` | `ROLE_WAREHOUSE`, `ROLE_ADMIN` | the parcel now holding the lines; see below |
+| `POST /api/v1/warehouse/shipments/{id}/short-pick` `{productId, missingQuantity}` | `ROLE_WAREHOUSE`, `ROLE_ADMIN` | the parcel that received the units; see below |
+| `GET /api/v1/warehouse/reconciliation` | `ROLE_WAREHOUSE`, `ROLE_ADMIN` | `[{orderId, backendState, aggregateState, lastMirroredState, parcels: [{shipmentId, locationCode, status}]}]`; 503 when the backend is down |
+
+Every shipment JSON adds `locationCode`, `locationName`, `parcelIndex`
+(1-based, oldest parcel first), `parcelCount` and `lines`
+(`[{productId, productName, category, quantity}]`); `totalUnits` and the pick
+list are per parcel.
+
+- **Reallocate** (only `AWAITING_PICK` parcels, else 409): without a target
+  the parcel goes to the best other active location that stocks all of its
+  categories (`PRIMARY` for all first, then a location where the order already
+  has an `AWAITING_PICK` parcel, then priority); with `targetLocation` that
+  location must exist (404), differ from the current one, be active and stock
+  every category (409 otherwise). The lines merge into the order's parcel there
+  (the moved parcel is removed) or, without one, the parcel itself changes
+  location (same id). 409 when the order's parcel there is past
+  `AWAITING_PICK` or no other location qualifies.
+- **Short pick** (only `AWAITING_PICK` parcels): moves `missingQuantity` units
+  of a line to the order's `AWAITING_PICK` parcel at another active location
+  that stocks the category, or to a new parcel there. 404 when the product is
+  not in the parcel; 409 when the quantity exceeds the line or no other active
+  location stocks the category. A parcel left without lines is removed.
+- Neither moves the aggregate forward, so neither calls the backend.
+- **Reconciliation** lists (at most 100, lowest order id first) orders with an
+  open parcel whose `max(last mirrored, aggregate)` differs from the backend's
+  `fulfilmentState`, for example a customer cancellation the feed has not
+  applied yet. Read-only.
+
+**Shipments created before 1.5.0** are migrated to location `KRK`. Their lines
+cannot be computed in SQL (the order snapshot lives in the backend), so V6
+marks them `lines_pending` and seeds their `order_locks` row with the shipment
+status as the last mirrored state. The lines (the order's items merged by
+product, since such a shipment was the order's only parcel) are filled from the
+order snapshot on the first read of the shipment (warehouse or customer
+endpoints), before a reallocation or short pick, and by the reconciler in
+batches of 100. Filling adds rows only: the shipment's state, `version` and
+`updatedAt` stay. While the backend is down the lines read as `[]`; the pick
+list of such a shipment is built from the order snapshot directly. Returns stay
+per order: the 30-day window starts with the delivery of the order's last
+parcel.
 
 ## Shipment tracking
 
@@ -194,7 +359,7 @@ UPS 3); `null` before the hand-over.
 
 | Endpoint | Access | Response |
 | --- | --- | --- |
-| `GET /api/v1/orders/{id}/shipment/tracking` | owner, `ROLE_ADMIN` | `TrackingDto`; 404 like `GET .../shipment` |
+| `GET /api/v1/orders/{id}/shipment/tracking` | owner, `ROLE_ADMIN` | `TrackingDto` of the order's first parcel; 404 like `GET .../shipment` |
 | `GET /api/v1/tracking/{trackingNumber}` | public | `PublicTrackingDto` (no `orderId`, owner or address); 404 "Tracking number not found" |
 | `POST /api/v1/warehouse/shipments/{id}/carrier/advance` | `ROLE_WAREHOUSE`, `ROLE_ADMIN` | one scan now, ignoring the interval; `TrackingDto`; 409 unless simulated and `SHIPPED` |
 
@@ -231,9 +396,9 @@ Profiles:
 | Profile | Database | Backend | Notes |
 | --- | --- | --- | --- |
 | (none) | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` | `http://localhost:4001` | token `local-warehouse-token` |
-| `local` | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` (user/password `postgres`) | `http://localhost:4001` | token `local-warehouse-token`, seeds demo suppliers, carrier step `PT30S` |
+| `local` | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` (user/password `postgres`) | `http://localhost:4001` | token `local-warehouse-token`, seeds demo suppliers and the demo location split, carrier step `PT30S` |
 | `docker` | Postgres `jdbc:postgresql://postgres:5432/testdb?currentSchema=warehouse` | `http://backend:4001` | `WAREHOUSE_SERVICE_TOKEN` required |
-| `demo` | – | – | combine as `docker,demo` to seed the demo suppliers; carrier step `PT30S` |
+| `demo` | – | – | combine as `docker,demo` to seed the demo suppliers and the demo location split; carrier step `PT30S` |
 
 Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.test,
 7 days) and "Baltic Gadgets" (purchasing@baltic-gadgets.test, 14 days).
@@ -253,6 +418,7 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 | `SPRING_DATASOURCE_URL` / `_USERNAME` / `_PASSWORD` | datasource | see profiles |
 | `MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE` | actuator exposure | `health,prometheus` |
 | `LOGGING_STRUCTURED_FORMAT_CONSOLE` | `logging.structured.format.console` | unset (human-readable lines with `[traceId,requestId]`); `ecs` for JSON lines |
+| `TRACING_ENABLED` / `TRACING_OTLP_ENDPOINT` / `TRACING_SAMPLING_PROBABILITY` | see [Tracing](#tracing) | `false` / `http://jaeger:4318/v1/traces` / `1.0` |
 
 ## Test
 
@@ -305,6 +471,7 @@ covered by Spring Boot and the GraalVM reachability-metadata repository.
 | Startup | Spring context 0.3 s; healthy 0.54 s after `docker run` |
 | Memory idle | 55.5 MiB (`docker stats`, cgroup working set) |
 | After 210 sequential + 600 concurrent (30 parallel) authenticated requests | 55–56 MiB, no OOM; process RSS 197 MB of which 54 MB anonymous and 143 MB file-mapped binary pages (reclaimable) |
+| With tracing compiled in (1.5.0, measured 2026-11-14 at the end of `scripts/native-smoke.sh`) | tracing off 64.7 MiB, tracing on (`SMOKE_TRACING=true`, spans exported) 61.9 MiB; image 415 MB unpacked |
 | Postgres connections | at most 3 (Hikari `maximum-pool-size: 3`, `minimum-idle: 1`, idle connections retired after 2 min) |
 
 Runtime tuning: the image runs with `CMD ["-Xmx64m"]` (native heap cap,
@@ -342,6 +509,6 @@ labels and is built on both architectures.
 ## Mutation testing
 
 - PITest: `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage`
-  (scope: `Carrier`, `ShipmentService`, `ReturnService`, `RefundCalculator`,
+  (scope: `Carrier`, `ShipmentService`, `ShipmentAllocator`, `FulfilmentAggregate`, `ReturnService`, `RefundCalculator`,
   `PurchasingService`, `JwtTokenValidator`, `JwtTokenFilter`,
   `RestBackendClient`, `BackendErrorMapper`, `service.tracking.*`, `service.event.*`, `correlation.*`). Advisory, not a gate.

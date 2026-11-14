@@ -4,7 +4,7 @@ import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.EventFeedPage;
 import com.awesome.warehouse.client.FeedEvent;
 import com.awesome.warehouse.controller.exception.CustomException;
-import com.awesome.warehouse.correlation.CorrelationContext;
+import com.awesome.warehouse.correlation.TracingSupport;
 import com.awesome.warehouse.entity.event.EventCursorEntity;
 import com.awesome.warehouse.entity.event.ProcessedEventEntity;
 import com.awesome.warehouse.repository.event.EventCursorRepository;
@@ -21,6 +21,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Pulls the backend's domain event feed ({@code GET /internal/v1/events}) from the stored
@@ -37,6 +38,11 @@ import java.util.List;
  * <p>Each scheduled run has its own generated correlation ids; while an event is handled the
  * MDC (and so every log line and backend call made for it) carries the event's
  * {@code requestId} and {@code traceId}, or generated ones when the event has none.
+ *
+ * <p>With tracing on each event is handled in a {@code CONSUMER} span {@code process <type>}
+ * whose parent is the event's {@code traceId}/{@code spanId}, so the backend request that wrote
+ * the event and what this service did about it are one trace (see {@link TracingSupport#consume}).
+ * The poll run itself is not recorded ({@code TracingConfig}).
  */
 @Slf4j
 @Component
@@ -56,11 +62,13 @@ public class EventFeedPoller {
     private final ProcessedEventRepository processedEvents;
     private final TransactionTemplate transaction;
     private final Clock warehouseClock;
+    private final TracingSupport tracing;
     private final boolean enabled;
 
     public EventFeedPoller(BackendClient backendClient, ShipmentService shipmentService,
                            EventCursorRepository cursors, ProcessedEventRepository processedEvents,
                            PlatformTransactionManager transactionManager, Clock warehouseClock,
+                           TracingSupport tracing,
                            @Value("${warehouse.events.enabled:true}") boolean enabled) {
         this.backendClient = backendClient;
         this.shipmentService = shipmentService;
@@ -68,6 +76,7 @@ public class EventFeedPoller {
         this.processedEvents = processedEvents;
         this.transaction = new TransactionTemplate(transactionManager);
         this.warehouseClock = warehouseClock;
+        this.tracing = tracing;
         this.enabled = enabled;
     }
 
@@ -75,7 +84,7 @@ public class EventFeedPoller {
             initialDelayString = "${warehouse.events.poll-interval:PT5S}")
     public void scheduledPoll() {
         if (enabled) {
-            CorrelationContext.generate().run(this::poll);
+            tracing.forJob().run(this::poll);
         }
     }
 
@@ -98,7 +107,8 @@ public class EventFeedPoller {
                 return handled;
             }
             for (FeedEvent event : page.events()) {
-                Outcome outcome = correlationOf(event).call(() -> process(event));
+                Outcome outcome = tracing.consume("process " + event.type(), event.requestId(), event.traceId(),
+                        event.spanId(), spanTags(event), () -> process(event));
                 if (outcome == Outcome.STOPPED) {
                     return handled;
                 }
@@ -120,9 +130,10 @@ public class EventFeedPoller {
         return cursors.findById(CONSUMER).map(EventCursorEntity::getLastSequence).orElse(0L);
     }
 
-    /** The ids of the backend request that wrote the event; invalid or missing ones are generated. */
-    static CorrelationContext correlationOf(FeedEvent event) {
-        return CorrelationContext.fromIds(event.requestId(), event.traceId());
+    /** Attributes of the event's span. */
+    static Map<String, String> spanTags(FeedEvent event) {
+        return Map.of("event.id", String.valueOf(event.id()), "event.type", String.valueOf(event.type()),
+                "event.sequence", Long.toString(event.sequence()));
     }
 
     private Outcome process(FeedEvent event) {

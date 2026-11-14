@@ -43,6 +43,12 @@ class OpenApiDocumentationTest extends AbstractFlowTest {
                 "/api/v1/warehouse/shipments/{id}/pick-list",
                 "/api/v1/warehouse/shipments/{id}/cancel",
                 "/api/v1/orders/{id}/shipment",
+                "/api/v1/orders/{id}/shipments",
+                "/api/v1/warehouse/locations",
+                "/api/v1/warehouse/locations/{code}",
+                "/api/v1/warehouse/shipments/{id}/reallocate",
+                "/api/v1/warehouse/shipments/{id}/short-pick",
+                "/api/v1/warehouse/reconciliation",
                 "/api/v1/orders/{orderId}/returns",
                 "/api/v1/returns",
                 "/api/v1/returns/{id}",
@@ -52,6 +58,8 @@ class OpenApiDocumentationTest extends AbstractFlowTest {
                 "/api/v1/admin/inventory/reorder-suggestions");
         assertThat(root.at("/paths/~1api~1v1~1warehouse~1queue/get/responses/503")).isNotNull();
         assertThat(root.at("/paths/~1api~1v1~1warehouse~1queue/get/responses").has("503")).isTrue();
+        assertThat(root.at("/components/schemas/ShipmentDto/properties").propertyNames())
+                .contains("locationCode", "locationName", "parcelIndex", "parcelCount", "lines");
     }
 
     @Test
