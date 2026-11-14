@@ -48,7 +48,8 @@ backend:
 
 warehouse:
   service-token: ${WAREHOUSE_SERVICE_TOKEN:local-warehouse-token}
-  # Demo suppliers; enabled by the local and demo profiles.
+  # Demo suppliers and the demo location split (Gdansk ships Books, Home & Kitchen and
+  # Wearables); enabled by the local and demo profiles.
   seed-demo-data: false
   # Reads the backend's domain event feed (GET /internal/v1/events) and cancels the
   # shipment of every cancelled order that is still AWAITING_PICK or PICKED.
@@ -56,7 +57,8 @@ warehouse:
     enabled: ${WAREHOUSE_EVENTS_ENABLED:true}
     poll-interval: ${WAREHOUSE_EVENTS_POLL_INTERVAL:PT5S}
   # Safety net behind the event feed: cancels shipments whose order was cancelled on
-  # the backend and adopts orders released without a shipment.
+  # the backend, adopts orders released without a shipment and fills the lines of
+  # shipments created before 1.5.0.
   reconcile:
     enabled: ${WAREHOUSE_RECONCILE_ENABLED:true}
     interval: ${WAREHOUSE_RECONCILE_INTERVAL:PT10M}

@@ -329,6 +329,8 @@
                             <targetClasses>
                                 <param>com.awesome.warehouse.entity.fulfilment.Carrier</param>
                                 <param>com.awesome.warehouse.service.fulfilment.ShipmentService</param>
+                                <param>com.awesome.warehouse.service.fulfilment.ShipmentAllocator*</param>
+                                <param>com.awesome.warehouse.service.fulfilment.FulfilmentAggregate</param>
                                 <param>com.awesome.warehouse.service.returns.ReturnService</param>
                                 <param>com.awesome.warehouse.service.returns.RefundCalculator</param>
                                 <param>com.awesome.warehouse.service.purchasing.PurchasingService</param>
@@ -343,6 +345,8 @@
                             <targetTests>
                                 <param>com.awesome.warehouse.entity.fulfilment.CarrierTest</param>
                                 <param>com.awesome.warehouse.service.fulfilment.ShipmentServiceTest</param>
+                                <param>com.awesome.warehouse.service.fulfilment.ShipmentAllocatorTest</param>
+                                <param>com.awesome.warehouse.service.fulfilment.FulfilmentAggregateTest</param>
                                 <param>com.awesome.warehouse.service.returns.*Test</param>
                                 <param>com.awesome.warehouse.service.purchasing.*Test</param>
                                 <param>com.awesome.warehouse.security.*Test</param>

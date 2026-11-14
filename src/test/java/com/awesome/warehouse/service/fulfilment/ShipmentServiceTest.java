@@ -601,12 +601,16 @@ class ShipmentServiceTest {
     void releaseFailsWhenTheBackendIsDownAndTheOrderWasNotReleased() {
         parcels.clear();
         InternalOrderDto order = order(OrderStatus.PAID, FulfilmentState.NONE, item(1, "Phone", "Electronics", 1));
-        when(backendClient.getOrder(42L)).thenReturn(order).thenReturn(order).thenThrow(UNAVAILABLE);
+        when(backendClient.getOrder(42L)).thenReturn(order, order).thenThrow(UNAVAILABLE);
         when(allocation.allocate(order)).thenReturn(plan("KRK", new ShipmentAllocator.Line(1L, "Phone", "Electronics", 1)));
         when(backendClient.updateFulfilment(42L, FulfilmentState.AWAITING_PICK)).thenThrow(UNAVAILABLE);
 
+        // The order is read again and still not released.
         assertThatThrownBy(() -> service.create(42L, "operator")).isSameAs(UNAVAILABLE);
+        // The re-read itself fails: the release is not assumed to have reached the backend.
+        org.mockito.Mockito.doReturn(order).doThrow(UNAVAILABLE).when(backendClient).getOrder(42L);
         assertThatThrownBy(() -> service.create(42L, "operator")).isSameAs(UNAVAILABLE);
+        verify(backendClient, times(2)).updateFulfilment(42L, FulfilmentState.AWAITING_PICK);
     }
 
     @Test
@@ -676,6 +680,7 @@ class ShipmentServiceTest {
         assertThat(picked.getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
         assertThat(otherOrder.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
         verify(orderLocks, never()).lockInTransaction(43L);
+        verify(backendClient).getOrders(java.util.Set.of(42L, 43L));
     }
 
     @Test
@@ -712,6 +717,7 @@ class ShipmentServiceTest {
         assertThat(saved.getValue().getOrderId()).isEqualTo(42L);
         assertThat(lock.getMirroredState()).isEqualTo(FulfilmentState.AWAITING_PICK);
         verify(backendClient, never()).updateFulfilment(anyLong(), any());
+        verify(orderLocks).ensureExists(42L);
         verify(orderLocks, never()).ensureExists(43L);
     }
 
@@ -769,12 +775,14 @@ class ShipmentServiceTest {
         when(lineRepository.findByShipmentIdOrderByIdAsc(7L)).thenReturn(List.of(
                 ShipmentLineEntity.builder().productId(1L).productName("Zoom").category("Audio").quantity(1).build(),
                 ShipmentLineEntity.builder().productId(2L).productName("apple").category(null).quantity(2).build(),
-                ShipmentLineEntity.builder().productId(3L).productName("Bass").category("audio").quantity(3).build()));
+                ShipmentLineEntity.builder().productId(3L).productName("Bass").category("audio").quantity(3).build(),
+                ShipmentLineEntity.builder().productId(4L).productName("Aardvark").category("Zoo").quantity(1).build()));
 
         PickListDto pickList = service.pickList(7L);
 
-        assertThat(pickList.getItems()).extracting(i -> i.getProductName()).containsExactly("apple", "Bass", "Zoom");
-        assertThat(pickList.getTotalUnits()).isEqualTo(6);
+        assertThat(pickList.getItems()).extracting(i -> i.getProductName())
+                .containsExactly("apple", "Bass", "Zoom", "Aardvark");
+        assertThat(pickList.getTotalUnits()).isEqualTo(7);
         assertThat(pickList.getShipmentId()).isEqualTo(7L);
         assertThat(pickList.getOrderId()).isEqualTo(42L);
         assertThat(pickList.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);

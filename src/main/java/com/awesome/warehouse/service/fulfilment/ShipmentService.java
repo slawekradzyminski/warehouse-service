@@ -186,7 +186,6 @@ public class ShipmentService {
             }
             parcels.add(parcel);
         });
-        lineRepository.flush();
         return parcels;
     }
 
