@@ -77,8 +77,11 @@ public class ReturnService {
 
     private ReturnDto createLocked(String username, InternalOrderDto order, CreateReturnDto request) {
         Long orderId = order.id();
-        LocalDateTime deliveredAt = shipmentRepository.findByOrderId(orderId)
+        // The order is delivered with its last parcel; the return window starts then.
+        LocalDateTime deliveredAt = shipmentRepository.findByOrderIdOrderByIdAsc(orderId).stream()
                 .map(ShipmentEntity::getDeliveredAt)
+                .filter(java.util.Objects::nonNull)
+                .max(LocalDateTime::compareTo)
                 .orElse(order.updatedAt());
         if (LocalDateTime.now(warehouseClock).isAfter(deliveredAt.plus(RETURN_WINDOW))) {
             throw new CustomException("The 30-day return window has passed", HttpStatus.CONFLICT);

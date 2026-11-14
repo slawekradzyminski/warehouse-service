@@ -18,10 +18,11 @@ import static org.mockito.Mockito.verify;
 class ShipmentReconcilerTest {
 
     private final ShipmentService shipmentService = mock(ShipmentService.class);
+    private final LegacyShipmentLines legacyLines = mock(LegacyShipmentLines.class);
 
     @Test
     void theScheduledRunIsSkippedWhenDisabled() {
-        new ShipmentReconciler(shipmentService, false).scheduledReconcile();
+        new ShipmentReconciler(shipmentService, legacyLines, false).scheduledReconcile();
 
         verify(shipmentService, never()).reconcileCancellations();
     }
@@ -31,14 +32,16 @@ class ShipmentReconcilerTest {
         List<String> requestIds = new ArrayList<>();
         doAnswer(invocation -> recordRequestId(requestIds)).when(shipmentService).reconcileCancellations();
         doAnswer(invocation -> recordRequestId(requestIds)).when(shipmentService).adoptReleasedOrders();
-        ShipmentReconciler reconciler = new ShipmentReconciler(shipmentService, true);
+        doAnswer(invocation -> recordRequestId(requestIds)).when(legacyLines).fillPendingBatch();
+        ShipmentReconciler reconciler = new ShipmentReconciler(shipmentService, legacyLines, true);
 
         reconciler.scheduledReconcile();
         reconciler.scheduledReconcile();
 
-        assertThat(requestIds).hasSize(4).doesNotContainNull();
-        assertThat(requestIds.get(0)).isEqualTo(requestIds.get(1)).isNotEqualTo(requestIds.get(2));
-        assertThat(requestIds.get(2)).isEqualTo(requestIds.get(3));
+        assertThat(requestIds).hasSize(6).doesNotContainNull();
+        assertThat(requestIds.get(0)).isEqualTo(requestIds.get(1)).isEqualTo(requestIds.get(2))
+                .isNotEqualTo(requestIds.get(3));
+        assertThat(requestIds.get(3)).isEqualTo(requestIds.get(4)).isEqualTo(requestIds.get(5));
         assertThat(MDC.get("requestId")).isNull();
     }
 
@@ -53,9 +56,10 @@ class ShipmentReconcilerTest {
         doThrow(new CustomException("Backend unavailable", HttpStatus.SERVICE_UNAVAILABLE))
                 .when(shipmentService).reconcileCancellations();
 
-        new ShipmentReconciler(shipmentService, true).scheduledReconcile();
+        new ShipmentReconciler(shipmentService, legacyLines, true).scheduledReconcile();
 
         verify(shipmentService, never()).adoptReleasedOrders();
+        verify(legacyLines, never()).fillPendingBatch();
         assertThat(MDC.get("requestId")).isNull();
     }
 }

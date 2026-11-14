@@ -9,7 +9,8 @@ import org.springframework.stereotype.Component;
 
 /**
  * Periodically aligns shipments with the backend orders: cancels shipments whose order the
- * customer cancelled, and adopts orders released to the warehouse without a local shipment.
+ * customer cancelled, adopts orders released to the warehouse without a local shipment and
+ * fills the lines of up to 100 shipments created before 1.5.0.
  * Cancellations normally arrive within seconds through {@code EventFeedPoller}; this run
  * (every ten minutes by default) is the safety net. A backend outage only skips the run.
  */
@@ -18,11 +19,13 @@ import org.springframework.stereotype.Component;
 public class ShipmentReconciler {
 
     private final ShipmentService shipmentService;
+    private final LegacyShipmentLines legacyLines;
     private final boolean enabled;
 
-    public ShipmentReconciler(ShipmentService shipmentService,
+    public ShipmentReconciler(ShipmentService shipmentService, LegacyShipmentLines legacyLines,
                               @Value("${warehouse.reconcile.enabled:true}") boolean enabled) {
         this.shipmentService = shipmentService;
+        this.legacyLines = legacyLines;
         this.enabled = enabled;
     }
 
@@ -39,6 +42,7 @@ public class ShipmentReconciler {
         try {
             shipmentService.reconcileCancellations();
             shipmentService.adoptReleasedOrders();
+            legacyLines.fillPendingBatch();
         } catch (CustomException e) {
             log.warn("Shipment reconciliation skipped: {}", e.getMessage());
         }

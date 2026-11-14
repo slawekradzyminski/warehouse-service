@@ -10,12 +10,13 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Schema(description = "Warehouse shipment for one order")
+@Schema(description = "Warehouse shipment: one parcel of an order, shipped from one location")
 public class ShipmentDto {
     @Schema(description = "Shipment ID", example = "1")
     private Long id;
@@ -25,8 +26,18 @@ public class ShipmentDto {
     private String username;
     @Schema(description = "Shipment status", example = "AWAITING_PICK")
     private ShipmentStatus status;
-    @Schema(description = "Units to pick", example = "3")
+    @Schema(description = "Units to pick for this parcel", example = "3")
     private int totalUnits;
+    @Schema(description = "Location the parcel ships from", example = "KRK")
+    private String locationCode;
+    @Schema(description = "Name of that location", example = "Krakow Central")
+    private String locationName;
+    @Schema(description = "1-based position of the parcel among the order's parcels (oldest first)", example = "1")
+    private int parcelIndex;
+    @Schema(description = "Number of parcels of the order", example = "2")
+    private int parcelCount;
+    @Schema(description = "Products in this parcel")
+    private List<ShipmentLineDto> lines;
     @Schema(types = {"string", "null"}, description = "Carrier, set when shipped", example = "DHL")
     private Carrier carrier;
     @Schema(types = {"string", "null"}, description = "Carrier tracking number", example = "1234567890")

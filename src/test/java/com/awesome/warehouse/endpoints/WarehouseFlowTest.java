@@ -248,7 +248,7 @@ class WarehouseFlowTest extends AbstractFlowTest {
                 .isEqualTo(ShipmentStatus.CANCELLED);
         assertThat(shipmentRepository.findById(active.getId()).orElseThrow().getStatus())
                 .isEqualTo(ShipmentStatus.AWAITING_PICK);
-        assertThat(shipmentRepository.findByOrderId(orphan.id())).hasValueSatisfying(adopted -> {
+        assertThat(shipmentRepository.findByOrderIdOrderByIdAsc(orphan.id())).singleElement().satisfies(adopted -> {
             assertThat(adopted.getStatus()).isEqualTo(ShipmentStatus.AWAITING_PICK);
             assertThat(adopted.getCreatedBy()).isEqualTo("system");
         });

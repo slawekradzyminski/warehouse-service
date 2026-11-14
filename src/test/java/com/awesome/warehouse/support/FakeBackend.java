@@ -162,6 +162,22 @@ public class FakeBackend implements BackendClient {
         publish("order.cancelled", cancelled);
     }
 
+    /**
+     * Customer cancellation as the backend decides it: allowed only while the order is PAID
+     * and its fulfilment state is NONE or AWAITING_PICK; publishes {@code order.cancelled}.
+     *
+     * @return whether the order was cancelled
+     */
+    public synchronized boolean tryCancelByCustomer(Long orderId) {
+        InternalOrderDto order = orders.get(orderId);
+        if (order.status() != OrderStatus.PAID || !Set.of(FulfilmentState.NONE, FulfilmentState.AWAITING_PICK)
+                .contains(order.fulfilmentState())) {
+            return false;
+        }
+        cancelByCustomer(orderId);
+        return true;
+    }
+
     /** Appends a domain event for the order to the feed, like the backend's synchronous event listener. */
     public FeedEvent publish(String type, InternalOrderDto order) {
         Map<String, Object> data = new java.util.LinkedHashMap<>();

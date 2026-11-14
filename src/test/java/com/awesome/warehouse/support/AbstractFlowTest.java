@@ -52,6 +52,8 @@ public abstract class AbstractFlowTest {
     @Autowired private com.awesome.warehouse.repository.event.EventCursorRepository eventCursors;
     @Autowired private com.awesome.warehouse.repository.event.ProcessedEventRepository processedEvents;
     @Autowired private com.awesome.warehouse.service.notification.NotificationDispatcher notificationDispatcher;
+    @Autowired protected com.awesome.warehouse.repository.fulfilment.WarehouseLocationRepository locationRepository;
+    @Autowired protected com.awesome.warehouse.repository.fulfilment.LocationProductRepository stockingRepository;
 
     @BeforeEach
     void resetBackend() {
@@ -70,6 +72,35 @@ public abstract class AbstractFlowTest {
         orderLocks.deleteAll();
         eventCursors.deleteAll();
         processedEvents.deleteAll();
+        resetLocations();
+    }
+
+    /** Back to the V6 baseline: both locations active, Krakow PRIMARY and Gdansk BACKUP for every category. */
+    private void resetLocations() {
+        locationRepository.findAll().forEach(location -> {
+            location.setActive(true);
+            locationRepository.save(location);
+        });
+        stockingRepository.deleteAll();
+        stock("KRK", "*", com.awesome.warehouse.entity.fulfilment.StockingRole.PRIMARY);
+        stock("GDN", "*", com.awesome.warehouse.entity.fulfilment.StockingRole.BACKUP);
+    }
+
+    /** The demo split (DemoDataSeeder): Gdansk is PRIMARY for Books (Krakow backs it up). */
+    protected void useDemoSplit() {
+        stock("GDN", "Books", com.awesome.warehouse.entity.fulfilment.StockingRole.PRIMARY);
+        stock("KRK", "Books", com.awesome.warehouse.entity.fulfilment.StockingRole.BACKUP);
+    }
+
+    protected void stock(String location, String category, com.awesome.warehouse.entity.fulfilment.StockingRole role) {
+        stockingRepository.save(com.awesome.warehouse.entity.fulfilment.LocationProductEntity.builder()
+                .locationCode(location).category(category).role(role).build());
+    }
+
+    protected void setActive(String location, boolean active) {
+        var entity = locationRepository.findById(location).orElseThrow();
+        entity.setActive(active);
+        locationRepository.save(entity);
     }
 
     /**

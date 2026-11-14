@@ -5,6 +5,8 @@ import com.awesome.warehouse.dto.ValidationErrorsDto;
 import com.awesome.warehouse.dto.fulfilment.CreateShipmentDto;
 import com.awesome.warehouse.dto.fulfilment.PackShipmentDto;
 import com.awesome.warehouse.dto.fulfilment.PickListDto;
+import com.awesome.warehouse.dto.fulfilment.ReallocateShipmentDto;
+import com.awesome.warehouse.dto.fulfilment.ShortPickDto;
 import com.awesome.warehouse.dto.fulfilment.ShipShipmentDto;
 import com.awesome.warehouse.dto.fulfilment.ShipmentDto;
 import com.awesome.warehouse.dto.tracking.TrackingDto;
@@ -12,6 +14,7 @@ import com.awesome.warehouse.dto.order.OrderDto;
 import com.awesome.warehouse.dto.order.PageDto;
 import com.awesome.warehouse.entity.fulfilment.ShipmentStatus;
 import com.awesome.warehouse.security.CustomPrincipal;
+import com.awesome.warehouse.service.fulfilment.ParcelAdminService;
 import com.awesome.warehouse.service.fulfilment.ShipmentService;
 import com.awesome.warehouse.service.tracking.TrackingService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -55,6 +58,7 @@ public class WarehouseController {
 
     private final ShipmentService shipmentService;
     private final TrackingService trackingService;
+    private final ParcelAdminService parcelAdminService;
 
     @GetMapping("/queue")
     @Operation(summary = "Get fulfilment queue", description = "Lists PAID orders that have not been released to the warehouse yet, oldest first. Negative page is clamped to zero; size is clamped to 1-100.")
@@ -66,13 +70,16 @@ public class WarehouseController {
     }
 
     @PostMapping("/shipments")
-    @Operation(summary = "Create shipment", description = "Releases a PAID order to the warehouse as an AWAITING_PICK shipment.")
-    @ApiResponse(responseCode = "201", description = "Shipment created")
+    @Operation(summary = "Create shipment", description = "Releases a PAID order to the warehouse. Each order line is allocated "
+            + "to the highest-priority active location that stocks its category (one location for the whole order when one "
+            + "location can take every line), and one AWAITING_PICK parcel is created per location. Returns the first parcel; "
+            + "parcelCount tells how many were created.")
+    @ApiResponse(responseCode = "201", description = "Parcels created; the first one is returned")
     @ApiResponse(responseCode = "400", description = "Invalid request",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ValidationErrorsDto.class)))
     @ApiResponse(responseCode = "404", description = "Order not found",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
-    @ApiResponse(responseCode = "409", description = "Order is not PAID or already has a shipment",
+    @ApiResponse(responseCode = "409", description = "Order is not PAID, already has a shipment, or no active location stocks one of its categories",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
     public ResponseEntity<ShipmentDto> create(
             @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
@@ -94,7 +101,7 @@ public class WarehouseController {
     }
 
     @GetMapping("/shipments/{id}")
-    @Operation(summary = "Get shipment", description = "Returns one shipment with its timestamps.")
+    @Operation(summary = "Get shipment", description = "Returns one parcel with its location, lines and timestamps.")
     @ApiResponse(responseCode = "200", description = "Shipment returned")
     @ApiResponse(responseCode = "404", description = "Shipment not found",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
@@ -103,7 +110,7 @@ public class WarehouseController {
     }
 
     @GetMapping("/shipments/{id}/pick-list")
-    @Operation(summary = "Get pick list", description = "Returns the products to pick grouped by product and sorted by category, then name.")
+    @Operation(summary = "Get pick list", description = "Returns the parcel's products to pick grouped by product and sorted by category, then name.")
     @ApiResponse(responseCode = "200", description = "Pick list returned")
     @ApiResponse(responseCode = "404", description = "Shipment not found",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
@@ -187,7 +194,9 @@ public class WarehouseController {
     }
 
     @PostMapping("/shipments/{id}/cancel")
-    @Operation(summary = "Cancel shipment", description = "Cancels an AWAITING_PICK or PICKED shipment. The order is cancelled, stock is restored and any coupon redemption is released.")
+    @Operation(summary = "Cancel shipment", description = "Cancels an AWAITING_PICK or PICKED parcel together with its order: every "
+            + "AWAITING_PICK or PICKED parcel of the order is cancelled, stock is restored and any coupon redemption is released. "
+            + "Refused while another parcel of the order is already PACKED or later.")
     @ApiResponse(responseCode = "200", description = "Shipment cancelled")
     @ApiResponse(responseCode = "404", description = "Shipment not found",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
@@ -197,5 +206,44 @@ public class WarehouseController {
             @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
             @PathVariable Long id) {
         return shipmentService.cancel(id, principal.username());
+    }
+
+    @PostMapping("/shipments/{id}/reallocate")
+    @Operation(summary = "Reallocate parcel", description = "Moves an AWAITING_PICK parcel to another active location: the given "
+            + "targetLocation, or without it the best other active location that stocks all of the parcel's categories. The lines "
+            + "merge into the order's parcel at that location when there is one (the moved parcel is then removed). Returns the "
+            + "parcel now holding the lines.")
+    @ApiResponse(responseCode = "200", description = "Parcel reallocated")
+    @ApiResponse(responseCode = "400", description = "Invalid target location code",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ValidationErrorsDto.class)))
+    @ApiResponse(responseCode = "404", description = "Shipment or target location not found",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    @ApiResponse(responseCode = "409", description = "Parcel is not AWAITING_PICK, or the target is the current, an inactive or "
+            + "a non-stocking location, or the order's parcel there is past AWAITING_PICK, or no other location can take it",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    public ShipmentDto reallocate(
+            @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
+            @PathVariable Long id,
+            @Valid @RequestBody(required = false) ReallocateShipmentDto request) {
+        return parcelAdminService.reallocate(id, request == null ? null : request.getTargetLocation(), principal.username());
+    }
+
+    @PostMapping("/shipments/{id}/short-pick")
+    @Operation(summary = "Report short pick", description = "Records units of a product that could not be picked for an "
+            + "AWAITING_PICK parcel and moves them to the order's AWAITING_PICK parcel at another active location that stocks the "
+            + "category (a new parcel when there is none). A parcel left without lines is removed. Returns the receiving parcel.")
+    @ApiResponse(responseCode = "200", description = "Units moved")
+    @ApiResponse(responseCode = "400", description = "Missing product or quantity below 1",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ValidationErrorsDto.class)))
+    @ApiResponse(responseCode = "404", description = "Shipment not found, or the product is not in it",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    @ApiResponse(responseCode = "409", description = "Parcel is not AWAITING_PICK, the quantity exceeds the line, or no other "
+            + "active location stocks the category",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ErrorDto.class)))
+    public ShipmentDto shortPick(
+            @Parameter(hidden = true) @AuthenticationPrincipal CustomPrincipal principal,
+            @PathVariable Long id,
+            @Valid @RequestBody ShortPickDto request) {
+        return parcelAdminService.shortPick(id, request.getProductId(), request.getMissingQuantity(), principal.username());
     }
 }
