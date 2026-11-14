@@ -21,7 +21,10 @@ COPY config config
 COPY src src
 # Heap of the native-image builder (build time only, not the runtime heap); the build peaks at ~8.4 GB RSS.
 ARG NATIVE_XMX=10g
-RUN --mount=type=cache,target=/root/.m2 MAVEN_OPTS="-Xmx384m" ./mvnw -B -Pnative -DskipTests -Dnative.xmx=${NATIVE_XMX} native:compile \
+# BuildKit's docker-container driver (GitHub Actions) injects OTEL_* variables into RUN steps; Spring Boot
+# maps OTEL_EXPORTER_OTLP_PROTOCOL onto the OTLP transport, and AOT would freeze a gRPC exporter into the image.
+# The native build therefore runs without any OTEL_* variable.
+RUN --mount=type=cache,target=/root/.m2 MAVEN_OPTS="-Xmx384m" env $(env | sed -n "s/^\(OTEL_[A-Za-z0-9_]*\)=.*/-u \1/p") ./mvnw -B -Pnative -DskipTests -Dnative.xmx=${NATIVE_XMX} native:compile \
     && cp target/warehouse-service /workspace/warehouse-service
 
 # Small glibc base that keeps bash, so the Compose healthcheck can use /dev/tcp.
