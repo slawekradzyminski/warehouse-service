@@ -1,6 +1,7 @@
 package com.awesome.warehouse.service.fulfilment;
 
 import com.awesome.warehouse.controller.exception.CustomException;
+import com.awesome.warehouse.correlation.TracingSupport;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
@@ -22,7 +23,7 @@ class ShipmentReconcilerTest {
 
     @Test
     void theScheduledRunIsSkippedWhenDisabled() {
-        new ShipmentReconciler(shipmentService, legacyLines, false).scheduledReconcile();
+        new ShipmentReconciler(shipmentService, legacyLines, TracingSupport.disabled(), false).scheduledReconcile();
 
         verify(shipmentService, never()).reconcileCancellations();
     }
@@ -33,7 +34,7 @@ class ShipmentReconcilerTest {
         doAnswer(invocation -> recordRequestId(requestIds)).when(shipmentService).reconcileCancellations();
         doAnswer(invocation -> recordRequestId(requestIds)).when(shipmentService).adoptReleasedOrders();
         doAnswer(invocation -> recordRequestId(requestIds)).when(legacyLines).fillPendingBatch();
-        ShipmentReconciler reconciler = new ShipmentReconciler(shipmentService, legacyLines, true);
+        ShipmentReconciler reconciler = new ShipmentReconciler(shipmentService, legacyLines, TracingSupport.disabled(), true);
 
         reconciler.scheduledReconcile();
         reconciler.scheduledReconcile();
@@ -56,7 +57,7 @@ class ShipmentReconcilerTest {
         doThrow(new CustomException("Backend unavailable", HttpStatus.SERVICE_UNAVAILABLE))
                 .when(shipmentService).reconcileCancellations();
 
-        new ShipmentReconciler(shipmentService, legacyLines, true).scheduledReconcile();
+        new ShipmentReconciler(shipmentService, legacyLines, TracingSupport.disabled(), true).scheduledReconcile();
 
         verify(shipmentService, never()).adoptReleasedOrders();
         verify(legacyLines, never()).fillPendingBatch();

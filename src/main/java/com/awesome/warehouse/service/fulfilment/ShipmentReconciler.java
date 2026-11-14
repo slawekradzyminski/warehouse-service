@@ -1,7 +1,7 @@
 package com.awesome.warehouse.service.fulfilment;
 
 import com.awesome.warehouse.controller.exception.CustomException;
-import com.awesome.warehouse.correlation.CorrelationContext;
+import com.awesome.warehouse.correlation.TracingSupport;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -20,12 +20,14 @@ public class ShipmentReconciler {
 
     private final ShipmentService shipmentService;
     private final LegacyShipmentLines legacyLines;
+    private final TracingSupport tracing;
     private final boolean enabled;
 
-    public ShipmentReconciler(ShipmentService shipmentService, LegacyShipmentLines legacyLines,
+    public ShipmentReconciler(ShipmentService shipmentService, LegacyShipmentLines legacyLines, TracingSupport tracing,
                               @Value("${warehouse.reconcile.enabled:true}") boolean enabled) {
         this.shipmentService = shipmentService;
         this.legacyLines = legacyLines;
+        this.tracing = tracing;
         this.enabled = enabled;
     }
 
@@ -34,7 +36,7 @@ public class ShipmentReconciler {
     public void scheduledReconcile() {
         if (enabled) {
             // Each run is its own unit of work in the logs and in the backend calls it makes.
-            CorrelationContext.generate().run(this::reconcile);
+            tracing.forJob().run(this::reconcile);
         }
     }
 
