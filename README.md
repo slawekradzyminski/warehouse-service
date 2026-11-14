@@ -578,6 +578,7 @@ covered by Spring Boot and the GraalVM reachability-metadata repository.
 | Memory idle | 55.5 MiB (`docker stats`, cgroup working set) |
 | After 210 sequential + 600 concurrent (30 parallel) authenticated requests | 55–56 MiB, no OOM; process RSS 197 MB of which 54 MB anonymous and 143 MB file-mapped binary pages (reclaimable) |
 | With tracing compiled in (1.5.0, measured 2026-11-14 at the end of `scripts/native-smoke.sh`) | tracing off 64.7 MiB, tracing on (`SMOKE_TRACING=true`, spans exported) 61.9 MiB; image 415 MB unpacked |
+| With the stock ledger (1.6.0, measured 2026-11-14 at the end of `scripts/native-smoke.sh`, after the import, reservations, level pushes and a reaper run) | tracing off 72.5 MiB, tracing on 92.3 MiB (`docker stats`, limit 160 MiB); native build 2 min 38 s |
 | Postgres connections | at most 3 (Hikari `maximum-pool-size: 3`, `minimum-idle: 1`, idle connections retired after 2 min) |
 
 Runtime tuning: the image runs with `CMD ["-Xmx64m"]` (native heap cap,

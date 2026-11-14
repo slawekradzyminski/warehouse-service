@@ -278,12 +278,16 @@ grep -q '"id":41,"productId":501,"orderId":null,"type":"INITIAL_STOCK","delta":1
   && echo "PASS movements keep the imported ids and the backend's JSON (nulls, microseconds)" \
   || { echo "FAIL movements: $movements" >&2; exit 1; }
 reservation=$(new_uuid)
-reserved=$(stock -X POST -d "{\"reservationId\":\"$reservation\",\"username\":\"smoke\",\"lines\":[{\"productId\":$PRODUCT,\"quantity\":2}]}" "$base/internal/v1/stock/reservations")
+reserve_body="{\"reservationId\":\"$reservation\",\"username\":\"smoke\",\"lines\":[{\"productId\":$PRODUCT,\"quantity\":2}]}"
+reserved=$(stock -X POST -d "$reserve_body" "$base/internal/v1/stock/reservations")
 [[ "$reserved" == "{\"reservationId\":\"$reservation\",\"lines\":[{\"productId\":501,\"quantityAfter\":6,\"ledgerVersion\":3}]}" ]] \
   && echo "PASS reserve (JPA lock and insert, record binding)" || { echo "FAIL reserve: $reserved" >&2; exit 1; }
 expect "confirm" "$(stock_status -X POST -d '{"orderId":4242}' "$base/internal/v1/stock/reservations/$reservation/confirm")" 200
-expect "insufficient stock" "$(stock_status -X POST -d "{\"reservationId\":\"$(new_uuid)\",\"username\":\"smoke\",\"lines\":[{\"productId\":$PRODUCT,\"quantity\":99}]}" "$base/internal/v1/stock/reservations")" 409
-adjusted=$(stock -X POST -d "{\"productId\":$PRODUCT,\"delta\":4,\"reason\":\"Recount\",\"requestId\":\"$(new_uuid)\",\"actor\":\"admin\"}" "$base/internal/v1/stock/adjustments")
+# JSON bodies go through variables: inline in "$(...)" bash would brace-expand them.
+too_many="{\"reservationId\":\"$(new_uuid)\",\"username\":\"smoke\",\"lines\":[{\"productId\":$PRODUCT,\"quantity\":99}]}"
+expect "insufficient stock" "$(stock_status -X POST -d "$too_many" "$base/internal/v1/stock/reservations")" 409
+adjustment="{\"productId\":$PRODUCT,\"delta\":4,\"reason\":\"Recount\",\"requestId\":\"$(new_uuid)\",\"actor\":\"admin\"}"
+adjusted=$(stock -X POST -d "$adjustment" "$base/internal/v1/stock/adjustments")
 grep -q '"type":"ADMIN_ADJUSTMENT","delta":4,"quantityAfter":10,' <<< "$adjusted" && grep -q '"ledgerVersion":4}$' <<< "$adjusted" \
   && echo "PASS adjust" || { echo "FAIL adjust: $adjusted" >&2; exit 1; }
 expect "create a stock item" "$(stock_status -X PUT -d '{"initialQuantity":3,"actor":"admin"}' "$base/internal/v1/stock/items/502")" 201
@@ -292,13 +296,15 @@ expect "delete a stock item" "$(stock_status -X DELETE "$base/internal/v1/stock/
 expect "release of an unknown reservation" "$(stock_status -X POST "$base/internal/v1/stock/reservations/$(new_uuid)/release")" 404
 # A reservation that is never confirmed: the reaper asks the backend (404) and releases it.
 orphan=$(new_uuid)
-expect "reserve an orphan" "$(stock_status -X POST -d "{\"reservationId\":\"$orphan\",\"username\":\"smoke\",\"lines\":[{\"productId\":$PRODUCT,\"quantity\":1}]}" "$base/internal/v1/stock/reservations")" 201
+orphan_body="{\"reservationId\":\"$orphan\",\"username\":\"smoke\",\"lines\":[{\"productId\":$PRODUCT,\"quantity\":1}]}"
+expect "reserve an orphan" "$(stock_status -X POST -d "$orphan_body" "$base/internal/v1/stock/reservations")" 201
 for _ in $(seq 1 30); do
   [[ "$(psql_value "select status from warehouse.stock_reservations where reservation_id = '$orphan'")" == RELEASED ]] && break
   sleep 1
 done
 expect "reaper released the orphan" "$(psql_value "select status from warehouse.stock_reservations where reservation_id = '$orphan'")" RELEASED
-docker exec "$RUN_ID-jwks" grep -q "/internal/v1/orders/by-reservation/$orphan" /tmp/by-reservation \
+# The proxy rule rewrites the path: the CGI sees /cgi-bin/by-reservation/<id>.
+docker exec "$RUN_ID-jwks" grep -q "/by-reservation/$orphan" /tmp/by-reservation \
   && echo "PASS reaper asked the backend for the orphan's order" || { echo "FAIL no by-reservation lookup" >&2; exit 1; }
 for _ in $(seq 1 30); do
   pushed=$(docker exec "$RUN_ID-jwks" sh -c 'cat /tmp/levels 2>/dev/null || true')
