@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Boots the warehouse-service image against a real Postgres and checks that the
-# native binary migrates the schema, seeds demo data, validates backend-style
+# native binary migrates the schema, seeds demo data (suppliers, location stocking),
+# serves the warehouse locations and parcel views, validates backend-style
 # RS256 JWTs against a JWKS, consumes the event feed, propagates correlation ids
 # (X-Request-Id / traceparent, ECS JSON logs) and serves health, metrics and OpenAPI. Instead of a backend, a busybox server publishes the JWKS at
 # /internal/v1/jwks.json and a one-event feed at /internal/v1/events (a CGI script
@@ -129,6 +130,14 @@ created=$(curl -sf -X POST -H "Authorization: Bearer $(token ROLE_ADMIN)" -H 'Co
 grep -q 'Smoke Supply' <<< "$created" && echo "PASS create supplier (JPA write in native image)"
 expect "public tracking of an unknown number (V3 schema, no token)" \
   "$(status_of "$base/api/v1/tracking/1234567890")" 404
+locations=$(curl -sf -H "Authorization: Bearer $(token ROLE_WAREHOUSE)" "$base/api/v1/warehouse/locations")
+grep -q '"name":"Krakow Central"' <<< "$locations" && grep -q '"primaryCategories":\["Books"' <<< "$locations" \
+  && echo "PASS warehouse locations (V6 schema) with the demo stocking split" \
+  || { echo "FAIL locations: $locations" >&2; exit 1; }
+deactivated=$(curl -sf -X PUT -H "Authorization: Bearer $(token ROLE_ADMIN)" -H 'Content-Type: application/json' \
+  -d '{"active":false}' "$base/api/v1/warehouse/locations/gdn")
+grep -q '"code":"GDN"' <<< "$deactivated" && grep -q '"active":false' <<< "$deactivated" && echo "PASS deactivate a location (JPA write, request binding)" \
+  || { echo "FAIL deactivate: $deactivated" >&2; exit 1; }
 
 psql_value() { docker exec "$RUN_ID-db" psql -U warehouse -d warehouse -tAc "$1"; }
 for _ in $(seq 1 30); do
@@ -139,6 +148,15 @@ expect "event feed cursor (V4 schema, feed JSON binding)" \
   "$(psql_value "select last_sequence from warehouse.event_cursors where consumer = 'warehouse-service'")" 1
 expect "processed event recorded" \
   "$(psql_value "select count(*) from warehouse.processed_events where event_id = '8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11'")" 1
+
+# A shipment written before 1.5.0 (V6 moves such rows to KRK with pending lines). The fake
+# backend has no order snapshots, so its lines stay pending and read as [].
+legacy_id=$(psql_value "insert into warehouse.shipments (order_id, username, location_code, total_units, status, created_by, last_actor, created_at, updated_at, lines_pending) values (777, 'smoke', 'KRK', 1, 'AWAITING_PICK', 'smoke', 'smoke', now(), now(), true) returning id" | head -n 1)
+legacy=$(curl -sf -H "Authorization: Bearer $(token ROLE_WAREHOUSE)" "$base/api/v1/warehouse/shipments/$legacy_id")
+grep -q '"locationName":"Krakow Central"' <<< "$legacy" && grep -q '"parcelCount":1' <<< "$legacy" \
+  && grep -q '"parcelIndex":1' <<< "$legacy" && grep -q '"lines":\[\]' <<< "$legacy" \
+  && echo "PASS parcel view of a pre-1.5.0 shipment (lines pending)" \
+  || { echo "FAIL legacy shipment: $legacy" >&2; exit 1; }
 
 header_of() { curl -s -o /dev/null -D - "${@:2}" | tr -d '\r' | awk -v name="$1" 'tolower($1) == tolower(name) ":" { print $2 }'; }
 expect "valid X-Request-Id is returned" "$(header_of X-Request-Id -H 'X-Request-Id: smoke-req.1' "$base/actuator/health")" smoke-req.1
