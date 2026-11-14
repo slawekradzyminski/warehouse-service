@@ -200,6 +200,9 @@ Service name: `warehouse-service` (`spring.application.name`). Propagation: W3C
   (Spring's scheduled-task observation). The event poll and notification
   retry runs are not recorded, so an idle feed adds no trace every 5 seconds;
   the event and delivery spans inside them are.
+- `SMOKE_TRACING=true scripts/native-smoke.sh <image>` runs the native smoke
+  test with tracing on and checks the OTLP export (tracing off it checks that
+  nothing is exported).
 - Micrometer's MDC listener is silenced; the correlation code owns the
   `traceId`/`spanId` MDC keys in both modes.
 
@@ -366,6 +369,7 @@ covered by Spring Boot and the GraalVM reachability-metadata repository.
 | Startup | Spring context 0.3 s; healthy 0.54 s after `docker run` |
 | Memory idle | 55.5 MiB (`docker stats`, cgroup working set) |
 | After 210 sequential + 600 concurrent (30 parallel) authenticated requests | 55–56 MiB, no OOM; process RSS 197 MB of which 54 MB anonymous and 143 MB file-mapped binary pages (reclaimable) |
+| With tracing compiled in (1.5.0, measured 2026-11-14 at the end of `scripts/native-smoke.sh`) | tracing off 64.7 MiB, tracing on (`SMOKE_TRACING=true`, spans exported) 61.9 MiB; image 415 MB unpacked |
 | Postgres connections | at most 3 (Hikari `maximum-pool-size: 3`, `minimum-idle: 1`, idle connections retired after 2 min) |
 
 Runtime tuning: the image runs with `CMD ["-Xmx64m"]` (native heap cap,

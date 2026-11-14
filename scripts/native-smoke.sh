@@ -63,7 +63,7 @@ head -c "${CONTENT_LENGTH:-0}" >> /tmp/traces
 printf 'Content-Type: application/x-protobuf\r\n\r\n'
 TRACES
 chmod 755 "$WORK/www/cgi-bin/traces"
-printf '.json:application/json\nP:/internal/v1/events:http://127.0.0.1:4001/cgi-bin/events\nP:/v1/traces:http://127.0.0.1:4001/cgi-bin/traces\n' > "$WORK/httpd.conf"
+printf '.json:application/json\nP:/internal/v1/events:http://127.0.0.1:4001/cgi-bin/events\n' > "$WORK/httpd.conf"
 chmod -R a+rX "$WORK/www" "$WORK/httpd.conf"
 
 token() {
@@ -111,7 +111,7 @@ docker run -d --name "$RUN_ID-app" --network "$NETWORK" --memory 160m -p "$PORT:
   -e WAREHOUSE_EVENTS_POLL_INTERVAL=PT1S \
   -e LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs \
   -e TRACING_ENABLED="$TRACING" \
-  -e TRACING_OTLP_ENDPOINT="http://$RUN_ID-jwks:4001/v1/traces" \
+  -e TRACING_OTLP_ENDPOINT="http://$RUN_ID-jwks:4001/cgi-bin/traces" \
   "$IMAGE" >/dev/null
 
 base="http://localhost:$PORT"
@@ -176,14 +176,14 @@ if [[ "$TRACING" == true ]]; then
   expect "traced request" "$(status_of -H 'traceparent: 00-0af7651916cd43dd8448eb211c80319d-b7ad6b7169203332-01' "$base/actuator/health")" 200
   # The batch span processor exports every 5 seconds; protobuf keeps strings readable.
   for _ in $(seq 1 30); do
-    exported=$(docker exec "$RUN_ID-jwks" sh -c 'cat /tmp/traces 2>/dev/null' | tr -c '[:print:]' ' ')
+    exported=$(docker exec "$RUN_ID-jwks" sh -c 'cat /tmp/traces 2>/dev/null || true' | tr -c '[:print:]' ' ')
     grep -q 'process order.cancelled' <<< "$exported" && grep -q 'http get /actuator/health' <<< "$exported" && break
     sleep 1
   done
   grep -q 'warehouse-service' <<< "$exported" && grep -q 'process order.cancelled' <<< "$exported" \
     && grep -q 'http get /actuator/health' <<< "$exported" \
     && echo "PASS OTLP HTTP export of the consumer and server spans (service warehouse-service)" \
-    || { echo "FAIL no OTLP export with the expected spans" >&2; exit 1; }
+    || { echo "FAIL no OTLP export with the expected spans ($(wc -c <<< "$exported") bytes): $exported" >&2; exit 1; }
 else
   sleep 6
   [[ -z "$(docker exec "$RUN_ID-jwks" sh -c 'cat /tmp/traces 2>/dev/null')" ]] \
