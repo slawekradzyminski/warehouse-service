@@ -109,6 +109,8 @@ class ReservationReaperTest {
 
         assertThat(reaper(true).reap()).isZero();
         assertThat(reaped()).isZero();
+        assertThat(reaper(true).reapOne(expired.getFirst().getReservationId()))
+                .isEqualTo(ReservationReaper.Outcome.SKIPPED);
     }
 
     @Test
@@ -149,6 +151,8 @@ class ReservationReaperTest {
         assertThat(reaper(true).reap()).isEqualTo(1);
 
         verify(stockService, never()).releaseExpired(first);
+        assertThat(reaper(true).reapOne(first)).isEqualTo(ReservationReaper.Outcome.SKIPPED);
+        assertThat(reaper(true).reapOne(second)).isEqualTo(ReservationReaper.Outcome.RELEASED);
     }
 
     @Test

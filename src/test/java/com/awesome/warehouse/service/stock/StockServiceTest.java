@@ -185,6 +185,7 @@ class StockServiceTest {
         service.reserve(request(RESERVATION, line(1, 2)));
         stock.item(2, 10, 1);
         service.reserve(request(UUID.randomUUID(), line(2, 1)));
+        stock.reservationRows.get(RESERVATION).setUpdatedAt(InMemoryStock.NOW.minusDays(1));
 
         ReservationDto confirmed = service.confirm(RESERVATION, 123);
 
@@ -192,6 +193,7 @@ class StockServiceTest {
         StockReservationEntity reservation = stock.reservationRows.get(RESERVATION);
         assertThat(reservation.getStatus()).isEqualTo(ReservationStatus.CONFIRMED);
         assertThat(reservation.getOrderId()).isEqualTo(123L);
+        assertThat(reservation.getUpdatedAt()).isEqualTo(InMemoryStock.NOW);
         assertThat(stock.movementsOf(1)).extracting(StockMovementEntity::getOrderId).containsExactly(123L);
         assertThat(stock.movementsOf(2)).extracting(StockMovementEntity::getOrderId).containsOnlyNulls();
         verify(stock.reservations).save(reservation);
@@ -236,6 +238,7 @@ class StockServiceTest {
         stock.item(1, 10, 1);
         stock.item(2, 5, 1);
         service.reserve(request(RESERVATION, line(1, 2), line(2, 5)));
+        stock.reservationRows.get(RESERVATION).setUpdatedAt(InMemoryStock.NOW.minusDays(1));
 
         ReleasedReservationDto released = service.release(RESERVATION);
         ReleasedReservationDto again = service.release(RESERVATION);
