@@ -19,7 +19,7 @@ class CorrelationFilterTest {
 
     private static final String TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736";
 
-    private final CorrelationFilter filter = new CorrelationFilter();
+    private final CorrelationFilter filter = new CorrelationFilter(TracingSupport.disabled());
     private final Map<String, String> seen = new HashMap<>();
     private final MockFilterChain chain = new MockFilterChain(new jakarta.servlet.http.HttpServlet() {
     }) {
@@ -30,8 +30,11 @@ class CorrelationFilterTest {
     };
 
     @Test
-    void runsBeforeEveryOtherFilter() {
-        assertThat(CorrelationFilter.class.getAnnotation(Order.class).value()).isEqualTo(Ordered.HIGHEST_PRECEDENCE);
+    void runsRightAfterTheServerObservationFilterAndBeforeEveryOtherFilter() {
+        // Spring Boot registers ServerHttpObservationFilter at HIGHEST_PRECEDENCE + 1; Spring Security is far later.
+        assertThat(CorrelationFilter.class.getAnnotation(Order.class).value())
+                .isEqualTo(Ordered.HIGHEST_PRECEDENCE + 2)
+                .isLessThan(org.springframework.boot.security.autoconfigure.web.servlet.SecurityFilterProperties.DEFAULT_FILTER_ORDER);
     }
 
     @Test

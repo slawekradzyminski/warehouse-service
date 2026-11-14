@@ -26,7 +26,8 @@ public record CorrelationContext(String requestId, String traceId, String spanId
 
     private static final Pattern REQUEST_ID = Pattern.compile("[A-Za-z0-9._-]{1,128}");
     private static final Pattern TRACE_ID = Pattern.compile("[0-9a-f]{32}");
-    private static final Pattern TRACEPARENT = Pattern.compile("00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}");
+    private static final Pattern SPAN_ID = Pattern.compile("[0-9a-f]{16}");
+    private static final Pattern TRACEPARENT = Pattern.compile("00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})");
     private static final String ZERO_TRACE_ID = "0".repeat(32);
     private static final String ZERO_SPAN_ID = "0".repeat(16);
     private static final String SAMPLED_FLAGS = "01";
@@ -105,28 +106,50 @@ public record CorrelationContext(String requestId, String traceId, String spanId
                 ? Optional.of(value) : Optional.empty();
     }
 
-    /** The trace id of a valid W3C {@code traceparent} (version 00, non-zero trace and parent ids). */
-    public static Optional<String> traceIdOf(String traceparent) {
-        if (traceparent == null) {
-            return Optional.empty();
-        }
-        Matcher matcher = TRACEPARENT.matcher(traceparent);
-        if (!matcher.matches() || ZERO_SPAN_ID.equals(matcher.group(2))) {
-            return Optional.empty();
-        }
-        return validTraceId(matcher.group(1));
+    /** A non-zero 16-hex span id (the parent id of a {@code traceparent}). */
+    public static Optional<String> validSpanId(String value) {
+        return value != null && SPAN_ID.matcher(value).matches() && !ZERO_SPAN_ID.equals(value)
+                ? Optional.of(value) : Optional.empty();
     }
 
-    static String newRequestId() {
+    /** The trace id of a valid W3C {@code traceparent} (version 00, non-zero trace and parent ids). */
+    public static Optional<String> traceIdOf(String traceparent) {
+        return Traceparent.parse(traceparent).map(Traceparent::traceId);
+    }
+
+    /** The parts of a valid W3C {@code traceparent}: trace id, parent (span) id and the sampled flag. */
+    public record Traceparent(String traceId, String spanId, boolean sampled) {
+
+        /** Version 00 with non-zero trace and parent ids; anything else is empty. */
+        public static Optional<Traceparent> parse(String traceparent) {
+            if (traceparent == null) {
+                return Optional.empty();
+            }
+            Matcher matcher = TRACEPARENT.matcher(traceparent);
+            if (!matcher.matches() || validSpanId(matcher.group(2)).isEmpty()
+                    || validTraceId(matcher.group(1)).isEmpty()) {
+                return Optional.empty();
+            }
+            boolean sampled = (Integer.parseInt(matcher.group(3), 16) & 1) == 1;
+            return Optional.of(new Traceparent(matcher.group(1), matcher.group(2), sampled));
+        }
+
+        /** The header value, for example {@code 00-<trace id>-<span id>-01}. */
+        public String value() {
+            return "00-" + traceId + "-" + spanId + (sampled ? "-01" : "-00");
+        }
+    }
+
+    public static String newRequestId() {
         return UUID.randomUUID().toString();
     }
 
-    static String newTraceId() {
+    public static String newTraceId() {
         String traceId = hex(ThreadLocalRandom.current().nextLong()) + hex(ThreadLocalRandom.current().nextLong());
         return ZERO_TRACE_ID.equals(traceId) ? newTraceId() : traceId;
     }
 
-    static String newSpanId() {
+    public static String newSpanId() {
         long value = ThreadLocalRandom.current().nextLong();
         return value == 0 ? newSpanId() : hex(value);
     }

@@ -142,7 +142,8 @@ unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
 
 ## Correlation IDs and logging
 
-- `CorrelationFilter` runs before every other filter. It keeps a valid incoming
+- `CorrelationFilter` runs right after Spring's server observation filter and
+  before every other filter (Spring Security included). It keeps a valid incoming
   `X-Request-Id` (1–128 characters of `[A-Za-z0-9._-]`) and the trace id of a
   valid W3C `traceparent` (`00-<32 hex>-<16 hex>-<2 hex>`, ids not all zeros);
   anything missing or invalid is generated (a UUID request id, a random trace
@@ -160,6 +161,68 @@ unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
   caused it, also on a retry. Rows from before 1.4.0 get fresh ids.
 - Scheduled jobs (event poll, reconciler, carrier simulator, notification
   retries) run each tick under a generated request and trace id.
+- With tracing on (below) the trace and span id in the MDC are those of the
+  current span; the request id is unchanged.
+
+## Tracing
+
+OpenTelemetry tracing through Micrometer Tracing (OTel bridge, OTLP HTTP
+exporter), compiled into the native image and **off by default**. Contract:
+`localstack-lab/docs/DISTRIBUTED_LAB_CONTRACTS.md`, section 4.
+
+| Variable | Property | Default |
+| --- | --- | --- |
+| `TRACING_ENABLED` | `warehouse.tracing.enabled` | `false`: nothing sampled, nothing exported |
+| `TRACING_OTLP_ENDPOINT` | `management.opentelemetry.tracing.export.otlp.endpoint` | `http://jaeger:4318/v1/traces` |
+| `TRACING_SAMPLING_PROBABILITY` | `management.tracing.sampling.probability` | `1.0` (new traces only; used only when enabled) |
+
+Service name: `warehouse-service` (`spring.application.name`). Propagation: W3C
+`traceparent` only (no baggage).
+
+- **Why not `management.tracing.export.enabled`:** Spring Boot's switch is a bean
+  condition, and Spring AOT fixes bean conditions when the native image is
+  built. The tracing beans are therefore always present and
+  `warehouse.tracing.enabled` is read at runtime (`TracingConfig`): off, the
+  sampler is `AlwaysOff`; on, it is parent-based with the probability above
+  for new traces. The same image runs either way.
+- **Dependencies:** `spring-boot-micrometer-tracing-opentelemetry`,
+  `micrometer-tracing-bridge-otel` and `opentelemetry-exporter-otlp` with the
+  JDK HTTP sender instead of OkHttp: the tracing half of
+  `spring-boot-starter-opentelemetry` without its OTLP metrics registry
+  (metrics stay on the Prometheus scrape) and without OkHttp/Kotlin in the
+  image.
+- **Server spans** are parented by a valid incoming `traceparent` (the gateway
+  always sends one), so the trace id in the logs and in the backend's
+  `domain_events.trace_id` is the exported one.
+- **Backend calls:** with tracing on the instrumented `RestClient` sends the
+  `traceparent` of its client span; the hand-built child `traceparent` is only
+  sent with tracing off. `X-Request-Id` is unchanged.
+- **Event feed:** each event is handled in a `CONSUMER` span
+  `process <type>` whose parent is the event's `traceId`/`spanId` (backend
+  3.21.0). Without a `spanId` the span starts a new trace and records the
+  event's trace id as the attribute `event.trace_id`.
+- **Notification outbox:** the stored `traceparent` is the span current at
+  enqueue time; each delivery is a `PRODUCER` span `send <TEMPLATE>` parented
+  by it.
+- **Scheduled jobs:** carrier steps and reconciler runs are root spans
+  (Spring's scheduled-task observation). The event poll and notification
+  retry runs are not recorded, so an idle feed adds no trace every 5 seconds;
+  the event and delivery spans inside them are.
+- `SMOKE_TRACING=true scripts/native-smoke.sh <image>` runs the native smoke
+  test with tracing on and checks the OTLP export (tracing off it checks that
+  nothing is exported).
+- Micrometer's MDC listener is silenced; the correlation code owns the
+  `traceId`/`spanId` MDC keys in both modes.
+
+## Outbox metrics
+
+On `/actuator/prometheus`, following the outbox convention of
+`awesome-localstack/docs/ARCHITECTURE_DECISIONS.md` (ADR 3):
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `warehouse_outbox_pending` | gauge | `notification_outbox` rows with `sent_at` null and `attempts` below 10, counted on each scrape (one indexed `count(*)`) |
+| `warehouse_outbox_failed_total` | counter | rows given up by this instance since it started (final rejection or tenth failed attempt) |
 - Logs: the default console lines include `[traceId,requestId]`.
   `LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs` (what the server Compose sets)
   writes one ECS JSON object per line with `requestId`, `traceId` and `spanId`
@@ -355,6 +418,7 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 | `SPRING_DATASOURCE_URL` / `_USERNAME` / `_PASSWORD` | datasource | see profiles |
 | `MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE` | actuator exposure | `health,prometheus` |
 | `LOGGING_STRUCTURED_FORMAT_CONSOLE` | `logging.structured.format.console` | unset (human-readable lines with `[traceId,requestId]`); `ecs` for JSON lines |
+| `TRACING_ENABLED` / `TRACING_OTLP_ENDPOINT` / `TRACING_SAMPLING_PROBABILITY` | see [Tracing](#tracing) | `false` / `http://jaeger:4318/v1/traces` / `1.0` |
 
 ## Test
 
@@ -407,6 +471,7 @@ covered by Spring Boot and the GraalVM reachability-metadata repository.
 | Startup | Spring context 0.3 s; healthy 0.54 s after `docker run` |
 | Memory idle | 55.5 MiB (`docker stats`, cgroup working set) |
 | After 210 sequential + 600 concurrent (30 parallel) authenticated requests | 55–56 MiB, no OOM; process RSS 197 MB of which 54 MB anonymous and 143 MB file-mapped binary pages (reclaimable) |
+| With tracing compiled in (1.5.0, measured 2026-11-14 at the end of `scripts/native-smoke.sh`) | tracing off 64.7 MiB, tracing on (`SMOKE_TRACING=true`, spans exported) 61.9 MiB; image 415 MB unpacked |
 | Postgres connections | at most 3 (Hikari `maximum-pool-size: 3`, `minimum-idle: 1`, idle connections retired after 2 min) |
 
 Runtime tuning: the image runs with `CMD ["-Xmx64m"]` (native heap cap,

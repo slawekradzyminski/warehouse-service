@@ -73,6 +73,11 @@ warehouse:
     enabled: ${WAREHOUSE_CARRIER_ENABLED:true}
     step-interval: ${WAREHOUSE_CARRIER_STEP_INTERVAL:PT2M}
 
+  # OpenTelemetry tracing, off by default (see TracingConfig). TRACING_ENABLED is read at
+  # runtime, so the same native image runs with and without tracing.
+  tracing:
+    enabled: ${TRACING_ENABLED:false}
+
 security:
   jwt:
     # Access tokens are RS256-signed by the backend and verified with the keys it
@@ -89,6 +94,21 @@ management:
     health:
       probes:
         enabled: true
+  # Tracing beans are always built (Spring AOT fixes bean conditions at image build time);
+  # warehouse.tracing.enabled decides at runtime whether anything is sampled and exported.
+  tracing:
+    sampling:
+      # New traces only; a sampled incoming traceparent is always followed. Used only when enabled.
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+    propagation:
+      type: w3c
+    baggage:
+      enabled: false
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${TRACING_OTLP_ENDPOINT:http://jaeger:4318/v1/traces}
 
 springdoc:
   api-docs:
