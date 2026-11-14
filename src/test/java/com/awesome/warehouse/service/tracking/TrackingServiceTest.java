@@ -67,7 +67,7 @@ class TrackingServiceTest {
         shipment = ShipmentEntity.builder().id(7L).orderId(42L).username("buyer").status(ShipmentStatus.SHIPPED)
                 .carrier(Carrier.DHL).trackingNumber(TRACKING).simulated(true).shippedAt(NOW.minusHours(1)).build();
         lenient().when(shipmentRepository.findById(7L)).thenReturn(Optional.of(shipment));
-        lenient().when(shipmentRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(shipment));
+        lenient().when(shipmentService.lockForUpdate(7L)).thenReturn(shipment);
         lenient().when(eventRepository.findByShipmentIdOrderByIdAsc(7L)).thenAnswer(invocation -> List.copyOf(events));
         lenient().when(eventRepository.save(any())).thenAnswer(invocation -> {
             events.add(invocation.getArgument(0));
@@ -188,6 +188,8 @@ class TrackingServiceTest {
         shipment.setStatus(ShipmentStatus.SHIPPED);
         shipment.setSimulated(false);
         assertThatThrownBy(() -> service.advance(7L, "operator")).isInstanceOf(CustomException.class);
+        when(shipmentService.lockForUpdate(8L))
+                .thenThrow(new CustomException("Shipment not found", HttpStatus.NOT_FOUND));
         assertThatThrownBy(() -> service.advance(8L, "operator")).hasMessage("Shipment not found");
     }
 

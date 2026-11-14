@@ -23,14 +23,16 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
- * Warehouse shipment for one backend order. The order lives in the backend,
- * so the shipment keeps the order id (no foreign key) plus the owner and unit
- * count captured when the order was released.
+ * Warehouse shipment (parcel) of one backend order from one location. An order has one
+ * parcel per location its lines were allocated to. The order lives in the backend, so
+ * the parcel keeps the order id (no foreign key) plus the owner and the parcel's unit
+ * count; its lines are {@link ShipmentLineEntity} rows.
  */
 @Entity
 @Table(
         name = "shipments",
-        uniqueConstraints = @UniqueConstraint(name = "uk_shipments_order", columnNames = "order_id"),
+        uniqueConstraints = @UniqueConstraint(name = "uk_shipments_order_location",
+                columnNames = {"order_id", "location_code"}),
         indexes = @Index(name = "idx_shipments_status_created", columnList = "status,created_at"))
 @Getter
 @Setter
@@ -48,6 +50,14 @@ public class ShipmentEntity {
 
     @Column(nullable = false)
     private String username;
+
+    @Column(name = "location_code", nullable = false, length = 8)
+    private String locationCode;
+
+    /** Shipments created before 1.5.0 get their lines from the order snapshot on first read. */
+    @Builder.Default
+    @Column(nullable = false)
+    private boolean linesPending = false;
 
     @Column(nullable = false)
     private Integer totalUnits;

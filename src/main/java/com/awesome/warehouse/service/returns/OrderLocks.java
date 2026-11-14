@@ -12,8 +12,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.util.function.Supplier;
 
 /**
- * Serialises return requests for the same order across every warehouse-service instance
- * with a database row lock. Orders live in the backend, so the lock is a row in
+ * Serialises writes for the same order (return requests and every fulfilment write of the
+ * order's parcels) across every warehouse-service instance with a database row lock. Orders live in the backend, so the lock is a row in
  * {@code order_locks}: it is created once in its own short transaction (a concurrent creator
  * merely loses the insert) and then locked with {@code SELECT ... FOR UPDATE} in the
  * transaction that runs the caller's work. The row is created before that transaction
@@ -47,7 +47,29 @@ public class OrderLocks {
         });
     }
 
-    private void ensureExists(long orderId) {
+    /**
+     * Locks this order's row in the caller's transaction and returns it (the fulfilment
+     * writes keep the last mirrored fulfilment state there). Call {@link #ensureExists} before
+     * the transaction starts; a row that is still missing is inserted here, in the same
+     * transaction and so on the same connection, and the insert itself holds the key lock.
+     */
+    public OrderLockEntity lockInTransaction(long orderId) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Order locks are taken inside a transaction");
+        }
+        return repository.findForUpdate(orderId)
+                .orElseGet(() -> repository.saveAndFlush(new OrderLockEntity(orderId)));
+    }
+
+    /**
+     * Creates the order's lock row in its own short transaction unless it exists. Call it
+     * outside any transaction (inside one it does nothing: {@link #lockInTransaction} creates
+     * the row).
+     */
+    public void ensureExists(long orderId) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            return;
+        }
         try {
             transaction.executeWithoutResult(status -> {
                 if (!repository.existsById(orderId)) {

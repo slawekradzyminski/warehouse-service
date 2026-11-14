@@ -3,7 +3,7 @@ package com.awesome.warehouse.service.notification;
 import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.NotificationRequest;
 import com.awesome.warehouse.controller.exception.CustomException;
-import com.awesome.warehouse.correlation.CorrelationContext;
+import com.awesome.warehouse.correlation.TracingSupport;
 import com.awesome.warehouse.entity.notification.NotificationOutboxEntity;
 import com.awesome.warehouse.repository.notification.NotificationOutboxRepository;
 import jakarta.annotation.PreDestroy;
@@ -39,7 +39,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * commits, and again on a schedule for those that failed. A backend outage (503) is retried
  * with exponential backoff; any other rejection (for example 404 for a deleted user) is
  * final. The backend drops duplicates by requestId, so a retry after a lost response never
- * sends a second email. Each delivery runs with the correlation ids stored at enqueue time.
+ * sends a second email. Each delivery runs with the correlation ids stored at enqueue time and,
+ * with tracing on, in a span whose parent is the stored {@code traceparent}. Rows given up are
+ * counted in {@link OutboxMetrics}.
  *
  * <p>The after-commit trigger only hands the work to a single dispatch thread: the listener
  * runs on the committing thread before its database connection is released, so sending there
@@ -62,6 +64,8 @@ public class NotificationDispatcher {
     private final BackendClient backendClient;
     private final TransactionTemplate transaction;
     private final Clock warehouseClock;
+    private final TracingSupport tracing;
+    private final OutboxMetrics metrics;
     private final boolean retryEnabled;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "notification-dispatch");
@@ -73,11 +77,14 @@ public class NotificationDispatcher {
 
     public NotificationDispatcher(NotificationOutboxRepository repository, BackendClient backendClient,
                                   PlatformTransactionManager transactionManager, Clock warehouseClock,
+                                  TracingSupport tracing, OutboxMetrics metrics,
                                   @Value("${warehouse.notifications.retry-enabled:true}") boolean retryEnabled) {
         this.repository = repository;
         this.backendClient = backendClient;
         this.transaction = new TransactionTemplate(transactionManager);
         this.warehouseClock = warehouseClock;
+        this.tracing = tracing;
+        this.metrics = metrics;
         this.retryEnabled = retryEnabled;
     }
 
@@ -97,7 +104,7 @@ public class NotificationDispatcher {
         try {
             executor.execute(() -> {
                 queued.set(false);
-                CorrelationContext.generate().run(this::dispatchQuietly);
+                tracing.forJob().run(this::dispatchQuietly);
             });
         } catch (RejectedExecutionException e) {
             queued.set(false);
@@ -142,7 +149,7 @@ public class NotificationDispatcher {
             initialDelayString = "${warehouse.notifications.retry-interval:PT30S}")
     public void retryDue() {
         if (retryEnabled) {
-            CorrelationContext.generate().run(this::dispatchDue);
+            tracing.forJob().run(this::dispatchDue);
         }
     }
 
@@ -168,11 +175,13 @@ public class NotificationDispatcher {
 
     /**
      * Sends with the correlation ids stored at enqueue time in the MDC, so the delivery is
-     * logged and sent under the request that caused it (rows without ids get fresh ones).
+     * logged and sent under the request that caused it (rows without ids get fresh ones). With
+     * tracing on the delivery is a span {@code send <TEMPLATE>} parented by the stored traceparent.
      */
     private boolean send(NotificationOutboxEntity notification) {
-        return CorrelationContext.fromHeaders(notification.getCorrelationId(), notification.getTraceparent())
-                .call(() -> deliver(notification));
+        return tracing.deliver("send " + notification.getTemplate(), notification.getCorrelationId(),
+                notification.getTraceparent(), Map.of("outbox.request_id", String.valueOf(notification.getRequestId())),
+                () -> deliver(notification));
     }
 
     private boolean deliver(NotificationOutboxEntity notification) {
@@ -187,12 +196,17 @@ public class NotificationDispatcher {
             log.warn("Could not send {} notification {} to {} ({}): {}", notification.getTemplate(),
                     notification.getRequestId(), notification.getUsername(), retryable ? "will retry" : "giving up",
                     e.getMessage());
+            AtomicBoolean givenUp = new AtomicBoolean();
             update(notification.getId(), row -> {
                 int attempts = retryable ? row.getAttempts() + 1 : MAX_ATTEMPTS;
                 row.setAttempts(attempts);
                 row.setLastError(truncate(e.getHttpStatus().value() + " " + e.getMessage()));
                 row.setNextAttemptAt(LocalDateTime.now(warehouseClock).plus(backoff(attempts)));
+                givenUp.set(attempts >= MAX_ATTEMPTS);
             });
+            if (givenUp.get()) {
+                metrics.givenUp();
+            }
             return false;
         }
     }

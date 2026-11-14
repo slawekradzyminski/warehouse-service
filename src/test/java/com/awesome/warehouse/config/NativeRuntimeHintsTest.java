@@ -30,4 +30,16 @@ class NativeRuntimeHintsTest {
         assertThat(NativeRuntimeHints.class.getAnnotation(RegisterReflectionForBinding.class).value())
                 .contains(EventFeedPage.class, FeedEvent.class);
     }
+
+    @Test
+    void parcelAndLocationTypesAreRegisteredForJsonBinding() {
+        assertThat(NativeRuntimeHints.class.getAnnotation(RegisterReflectionForBinding.class).value())
+                .contains(com.awesome.warehouse.dto.fulfilment.ShipmentLineDto.class,
+                        com.awesome.warehouse.dto.fulfilment.ReconciliationDto.Parcel.class,
+                        com.awesome.warehouse.dto.fulfilment.WarehouseLocationDto.class);
+        RuntimeHints hints = new RuntimeHints();
+        new NativeRuntimeHints.Registrar().registerHints(hints, getClass().getClassLoader());
+        assertThat(RuntimeHintsPredicates.resource()
+                .forResource("db/migration/V6__warehouse_locations_and_parcels.sql")).accepts(hints);
+    }
 }

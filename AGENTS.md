@@ -52,7 +52,8 @@ in-memory `FakeBackend`, which implements the contract's internal-API rules.
 # Mutation-testing workflow
 
 - PITest: run the profile above after normal verification when you
-  change the shipment state machine, returns, refunds, purchasing receipts, the
+  change the shipment state machine, allocation (`ShipmentAllocator`), the
+  aggregate mirror (`FulfilmentAggregate`), returns, refunds, purchasing receipts, the
   JWT validator or filter, or the backend client error mapping. Narrow it for
   small changes, for example
   `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage -DtargetClasses=com.awesome.warehouse.service.returns.ReturnService -DtargetTests=com.awesome.warehouse.service.returns.ReturnServiceTest`.

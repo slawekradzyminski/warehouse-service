@@ -143,12 +143,15 @@ class ReturnServiceTest {
     @Test
     void windowIsThirtyDaysFromShipmentDeliveryInclusive() {
         givenOrder(order(OrderStatus.DELIVERED, NOW, "10.00", "10.00", item(1, 2, "10.00")));
-        ShipmentEntity shipment = ShipmentEntity.builder().deliveredAt(NOW.minusDays(30)).build();
-        when(shipmentRepository.findByOrderId(42L)).thenReturn(Optional.of(shipment));
+        // Two parcels: the window starts with the later delivery.
+        ShipmentEntity first = ShipmentEntity.builder().deliveredAt(NOW.minusDays(40)).build();
+        ShipmentEntity last = ShipmentEntity.builder().deliveredAt(NOW.minusDays(30)).build();
+        ShipmentEntity undelivered = ShipmentEntity.builder().build();
+        when(shipmentRepository.findByOrderIdOrderByIdAsc(42L)).thenReturn(List.of(first, undelivered, last));
 
         assertThat(service.create("buyer", 42L, request(line(1, 1)))).isNotNull();
 
-        shipment.setDeliveredAt(NOW.minusDays(30).minusSeconds(1));
+        last.setDeliveredAt(NOW.minusDays(30).minusSeconds(1));
         assertThatThrownBy(() -> service.create("buyer", 42L, request(line(1, 1))))
                 .isInstanceOfSatisfying(CustomException.class, e -> {
                     assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.CONFLICT);

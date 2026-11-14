@@ -11,6 +11,13 @@ import com.awesome.warehouse.client.NotificationRequest;
 import com.awesome.warehouse.client.OrderRefundRequest;
 import com.awesome.warehouse.client.JwkSet;
 import com.awesome.warehouse.dto.ErrorDto;
+import com.awesome.warehouse.dto.fulfilment.ReallocateShipmentDto;
+import com.awesome.warehouse.dto.fulfilment.ReconciliationDto;
+import com.awesome.warehouse.dto.fulfilment.ShipmentDto;
+import com.awesome.warehouse.dto.fulfilment.ShipmentLineDto;
+import com.awesome.warehouse.dto.fulfilment.ShortPickDto;
+import com.awesome.warehouse.dto.fulfilment.UpdateLocationDto;
+import com.awesome.warehouse.dto.fulfilment.WarehouseLocationDto;
 import com.awesome.warehouse.dto.order.PageDto;
 import org.springframework.aot.hint.MemberCategory;
 import org.springframework.aot.hint.RuntimeHints;
@@ -28,7 +35,9 @@ import java.util.List;
  *
  * <ul>
  *   <li>Internal-API records are (de)serialised by Jackson through {@code RestClient},
- *       which AOT cannot infer from controller signatures.</li>
+ *       which AOT cannot infer from controller signatures. The parcel and location DTOs
+ *       are listed too: nested and list element types ({@code ShipmentDto.lines},
+ *       {@code ReconciliationDto.Parcel}) are bound without relying on inference.</li>
  *   <li>JJWT's API module instantiates its implementation classes by name
  *       ({@code Classes.newInstance("io.jsonwebtoken.impl...")}); exactly those
  *       classes (and the Jackson (de)serializers found through ServiceLoader)
@@ -56,7 +65,15 @@ import java.util.List;
     EventFeedPage.class,
     FeedEvent.class,
     PageDto.class,
-    ErrorDto.class
+    ErrorDto.class,
+    ShipmentDto.class,
+    ShipmentLineDto.class,
+    WarehouseLocationDto.class,
+    UpdateLocationDto.class,
+    ReallocateShipmentDto.class,
+    ShortPickDto.class,
+    ReconciliationDto.class,
+    ReconciliationDto.Parcel.class
 })
 public class NativeRuntimeHints {
 
