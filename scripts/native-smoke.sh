@@ -7,7 +7,8 @@
 # (V7 schema, backend service token, reserve/confirm/adjust/items, restore from the
 # feed, level push, reaper) and serves health, metrics and OpenAPI. Instead of a
 # backend, a busybox server publishes the JWKS at /internal/v1/jwks.json and CGI
-# scripts behind httpd proxy rules answer the feed (/internal/v1/events), the ledger
+# scripts behind httpd proxy rules answer the feed (/internal/v1/events, with order.cancelled and
+# stock.restore-requested), the ledger
 # export (/internal/v1/inventory/export), the level push (/internal/v1/inventory/levels)
 # and the reaper's order lookup (/internal/v1/orders/by-reservation/{id}, always 404);
 # the other checks only touch endpoints answered from the service's database.
@@ -49,8 +50,9 @@ KID="native-smoke-key"
 mkdir -p "$WORK/www/internal/v1"
 printf '{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"%s","n":"%s","e":"%s"}]}' \
   "$KID" "$MODULUS" "$EXPONENT" > "$WORK/www/internal/v1/jwks.json"
-# Event feed: one order.cancelled event for an order without a shipment (sequence 1), then nothing.
-# Its stockRestore puts one unit of product 501 back once the ledger is imported.
+# Event feed: one order.cancelled event for an order without a shipment (sequence 1) and the
+# backend's internal stock.restore-requested of the same cancel (sequence 2), then nothing. The
+# restore puts one unit of product 501 back once the ledger is imported.
 # The event carries the correlation ids of the backend request that wrote it; the script
 # records the X-Request-Id and traceparent headers of every feed request.
 mkdir -p "$WORK/www/cgi-bin"
@@ -59,8 +61,8 @@ cat > "$WORK/www/cgi-bin/events" <<'FEED'
 echo "$HTTP_X_REQUEST_ID $HTTP_TRACEPARENT" >> /tmp/feed-headers
 printf 'Content-Type: application/json\r\n\r\n'
 case "$QUERY_STRING" in
-  after=0\&*) printf '%s' '{"events":[{"sequence":1,"id":"8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11","type":"order.cancelled","occurredAt":"2026-11-11T09:30:15.123Z","orderId":999999,"username":"smoke","data":{"orderId":999999,"status":"CANCELLED","totalAmount":10.00,"failureCode":null,"stockRestore":{"actor":"smoke","lines":[{"productId":501,"quantity":1}]}},"requestId":"smoke-feed-request","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"b7ad6b7169203331"}],"nextCursor":1,"hasMore":false}' ;;
-  *) printf '%s' '{"events":[],"nextCursor":1,"hasMore":false}' ;;
+  after=0\&*) printf '%s' '{"events":[{"sequence":1,"id":"8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11","type":"order.cancelled","occurredAt":"2026-11-11T09:30:15.123Z","orderId":999999,"username":"smoke","data":{"orderId":999999,"status":"CANCELLED","totalAmount":10.00,"failureCode":null},"requestId":"smoke-feed-request","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"b7ad6b7169203331"},{"sequence":2,"id":"3c9a1f6e-2b7d-4e8a-9f10-6d5e4c3b2a19","type":"stock.restore-requested","occurredAt":"2026-11-11T09:30:15.124Z","orderId":999999,"username":"smoke","data":{"orderId":999999,"actor":"smoke","lines":[{"productId":501,"quantity":1}]},"requestId":"smoke-feed-request","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"b7ad6b7169203331"}],"nextCursor":2,"hasMore":false}' ;;
+  *) printf '%s' '{"events":[],"nextCursor":2,"hasMore":false}' ;;
 esac
 FEED
 chmod 755 "$WORK/www/cgi-bin/events"
@@ -196,13 +198,13 @@ grep -q '"code":"GDN"' <<< "$deactivated" && grep -q '"active":false' <<< "$deac
 
 psql_value() { docker exec "$RUN_ID-db" psql -U warehouse -d warehouse -tAc "$1"; }
 for _ in $(seq 1 30); do
-  [[ "$(psql_value "select last_sequence from warehouse.event_cursors where consumer = 'warehouse-service'")" == 1 ]] && break
+  [[ "$(psql_value "select last_sequence from warehouse.event_cursors where consumer = 'warehouse-service'")" == 2 ]] && break
   sleep 1
 done
 expect "event feed cursor (V4 schema, feed JSON binding)" \
-  "$(psql_value "select last_sequence from warehouse.event_cursors where consumer = 'warehouse-service'")" 1
-expect "processed event recorded" \
-  "$(psql_value "select count(*) from warehouse.processed_events where event_id = '8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11'")" 1
+  "$(psql_value "select last_sequence from warehouse.event_cursors where consumer = 'warehouse-service'")" 2
+expect "processed events recorded (cancel and restore)" \
+  "$(psql_value "select count(*) from warehouse.processed_events where event_id in ('8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11', '3c9a1f6e-2b7d-4e8a-9f10-6d5e4c3b2a19')")" 2
 
 # A shipment written before 1.5.0 (V6 moves such rows to KRK with pending lines). The fake
 # backend has no order snapshots, so its lines stay pending and read as [].
@@ -269,7 +271,7 @@ for _ in $(seq 1 30); do
 done
 item=$(stock "$base/internal/v1/stock/items/$PRODUCT")
 [[ "$item" == '{"productId":501,"quantity":8,"ledgerVersion":2}' ]] \
-  && echo "PASS ledger imported (7 units, version 1) and order.cancelled stockRestore applied once (8, version 2)" \
+  && echo "PASS ledger imported (7 units, version 1) and stock.restore-requested applied once (8, version 2)" \
   || { echo "FAIL stock item after import and restore: $item" >&2; exit 1; }
 movements=$(stock "$base/internal/v1/stock/movements?productId=$PRODUCT&size=5")
 grep -q '"id":41,"productId":501,"orderId":null,"type":"INITIAL_STOCK","delta":10,"quantityAfter":10,"actor":"admin","reason":"Initial stock","requestId":null,"createdAt":"2026-11-01T09:15:30.123456"}' <<< "$movements" \

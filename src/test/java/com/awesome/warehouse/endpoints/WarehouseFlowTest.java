@@ -168,7 +168,7 @@ class WarehouseFlowTest extends AbstractFlowTest {
         ShipmentDto cancelled = transition(pickedShipment.getId(), "cancel", null).as(ShipmentDto.class);
         Response cancelPacked = postJson(WAREHOUSE + "/shipments/" + packedShipment.getId() + "/cancel", null,
                 warehouseToken);
-        // The backend's order.cancelled carries stockRestore; the ledger restores from the feed.
+        // The backend records stock.restore-requested with the cancel; the ledger restores from the feed.
         eventFeedPoller.poll();
         awaitStockPush();
 

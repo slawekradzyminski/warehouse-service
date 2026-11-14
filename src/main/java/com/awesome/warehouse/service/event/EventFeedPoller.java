@@ -28,19 +28,19 @@ import java.util.Map;
 /**
  * Pulls the backend's domain event feed ({@code GET /internal/v1/events}) from the stored
  * cursor and reacts to the events this service cares about:
- * {@code order.cancelled} cancels the order's shipment while it is AWAITING_PICK or PICKED and,
- * when the event carries {@code stockRestore}, restores the order's stock in the ledger
- * ({@link StockRestoreConsumer}, once per order). The feed is not read before the stock ledger
- * is initialised, so no restore is skipped during the startup import.
+ * {@code order.cancelled} cancels the order's shipment while it is AWAITING_PICK or PICKED, and
+ * the backend's internal {@code stock.restore-requested} restores a cancelled order's stock in
+ * the ledger ({@link StockRestoreConsumer}, once per order). The feed is not read before the
+ * stock ledger is initialised, so no restore is skipped during the startup import.
  *
  * <p>Each event is handled in its own local transaction that locks the cursor row (so
  * several instances never handle one event concurrently), skips events already in
  * {@code processed_events}, applies the change, records the event as processed and
  * advances the cursor. A backend outage ends the run; the next tick resumes from the
  * cursor. An event whose handling fails is logged with its id and skipped, so one bad
- * event never blocks the feed. The stock restore runs first, in its own transaction, so a
- * failing shipment change cannot undo it; a restore that fails for a transient reason stops the
- * run (the next run retries the event), a malformed {@code stockRestore} is logged and skipped.
+ * event never blocks the feed. A stock restore runs in its own transaction before the event is
+ * recorded as processed; a restore that fails for a transient reason stops the run (the next run
+ * retries the event), a malformed restore event is logged and skipped.
  * {@code ShipmentReconciler} remains as a slow safety net.
  *
  * <p>Each scheduled run has its own generated correlation ids; while an event is handled the
@@ -59,7 +59,8 @@ public class EventFeedPoller {
     /** Cursor row of this service in {@code event_cursors}. */
     public static final String CONSUMER = "warehouse-service";
     static final String ORDER_CANCELLED = "order.cancelled";
-    static final List<String> TYPES = List.of(ORDER_CANCELLED);
+    static final String STOCK_RESTORE_REQUESTED = StockRestoreConsumer.STOCK_RESTORE_REQUESTED;
+    static final List<String> TYPES = List.of(ORDER_CANCELLED, STOCK_RESTORE_REQUESTED);
     static final int PAGE_SIZE = 100;
     /** Upper bound of pages read per run, so a large backlog does not monopolise the scheduler thread. */
     static final int MAX_PAGES_PER_RUN = 10;
@@ -154,7 +155,7 @@ public class EventFeedPoller {
     }
 
     private Outcome restoreThenProcess(FeedEvent event) {
-        if (ORDER_CANCELLED.equals(event.type()) && !restoreStock(event)) {
+        if (STOCK_RESTORE_REQUESTED.equals(event.type()) && !restoreStock(event)) {
             return Outcome.STOPPED;
         }
         return process(event);
@@ -166,7 +167,7 @@ public class EventFeedPoller {
             stockRestores.restore(event);
             return true;
         } catch (IllegalArgumentException e) {
-            log.error("Event {} has an invalid stockRestore; its stock is not restored: {}", event.id(), e.getMessage());
+            log.error("Restore event {} is invalid; its stock is not restored: {}", event.id(), e.getMessage());
             return true;
         } catch (RuntimeException e) {
             log.warn("Stock restore of event {} failed; the run stops and retries it next time: {}", event.id(),
@@ -201,6 +202,8 @@ public class EventFeedPoller {
     private void handle(FeedEvent event) {
         if (ORDER_CANCELLED.equals(event.type())) {
             shipmentService.followOrderCancellation(orderId(event));
+        } else if (STOCK_RESTORE_REQUESTED.equals(event.type())) {
+            log.debug("Restore event {} applied by the stock ledger", event.id());
         } else {
             log.debug("Ignoring event {} of type {}", event.id(), event.type());
         }

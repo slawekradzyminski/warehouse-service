@@ -13,21 +13,24 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.Collection;
 import java.util.Map;
-import java.util.Optional;
 import java.util.TreeMap;
 
 /**
- * Restores the stock of a cancelled order from the {@code stockRestore} of its
- * {@code order.cancelled} feed event (contract 3.1): one {@code ORDER_RESTORED} movement per
- * line with the order id, the event's actor and the reason "Order cancellation". A restore
- * happens at most once per order ({@code stock_restores}); events without {@code stockRestore}
- * (legacy rows, shipped orders) are ignored. Lines whose product has no item any more are
- * skipped with a warning.
+ * Restores the stock of a cancelled order from the backend's internal feed event
+ * {@value #STOCK_RESTORE_REQUESTED} (contract 3.1), whose data is
+ * {@code {"orderId":123,"actor":"alice","lines":[{"productId":1,"quantity":2}]}}: one
+ * {@code ORDER_RESTORED} movement per line with the order id, the event's actor and the reason
+ * "Order cancellation". A restore happens at most once per order ({@code stock_restores}, on top
+ * of the feed's {@code processed_events}). {@code order.cancelled} never restores stock; the
+ * backend records this separate event only for orders whose stock was deducted. Lines whose
+ * product has no item any more are skipped with a warning.
  */
 @Slf4j
 @Component
 public class StockRestoreConsumer {
 
+    /** Wire type of the backend's internal restore event. */
+    public static final String STOCK_RESTORE_REQUESTED = "stock.restore-requested";
     static final String ORDER_CANCELLATION = "Order cancellation";
 
     private final StockRestoreRepository restores;
@@ -43,7 +46,7 @@ public class StockRestoreConsumer {
         this.transaction = new TransactionTemplate(transactionManager);
     }
 
-    /** The {@code stockRestore} of an event: who cancelled and the quantities per product. */
+    /** A requested restore: the order, who cancelled it and the quantities per product. */
     public record StockRestore(long orderId, String actor, Map<Long, Integer> quantities) {
 
         public StockRestore {
@@ -52,22 +55,23 @@ public class StockRestoreConsumer {
     }
 
     /**
-     * Applies the event's restore in its own transaction.
+     * Applies a {@value #STOCK_RESTORE_REQUESTED} event in its own transaction; other event types
+     * are ignored.
      *
-     * @return whether stock was restored by this call (false without {@code stockRestore} or when
-     *         the order was restored before)
-     * @throws IllegalArgumentException when {@code stockRestore} is malformed (a permanent failure)
+     * @return whether stock was restored by this call (false for other event types or when the
+     *         order was restored before)
+     * @throws IllegalArgumentException when the event's data is malformed (a permanent failure)
      */
     public boolean restore(FeedEvent event) {
-        Optional<StockRestore> restore = parse(event);
-        if (restore.isEmpty()) {
+        if (!STOCK_RESTORE_REQUESTED.equals(event.type())) {
             return false;
         }
+        StockRestore restore = parse(event);
         readiness.requireReady();
         try {
-            return Boolean.TRUE.equals(transaction.execute(status -> apply(event, restore.get())));
+            return Boolean.TRUE.equals(transaction.execute(status -> apply(event, restore)));
         } catch (DataIntegrityViolationException e) {
-            log.info("Stock of order {} was restored concurrently", restore.get().orderId());
+            log.info("Stock of order {} was restored concurrently", restore.orderId());
             return false;
         }
     }
@@ -97,37 +101,33 @@ public class StockRestoreConsumer {
     }
 
     /**
-     * Reads {@code data.stockRestore}: {@code {"actor":"alice","lines":[{"productId":1,"quantity":2}]}}.
-     * Repeated products are summed.
+     * Reads the event's data {@code {"orderId":123,"actor":"alice","lines":[{"productId":1,"quantity":2}]}};
+     * the event's own {@code orderId} is used when the data has none. Repeated products are summed.
      */
-    static Optional<StockRestore> parse(FeedEvent event) {
-        Object raw = event.data().get("stockRestore");
-        if (raw == null) {
-            return Optional.empty();
+    static StockRestore parse(FeedEvent event) {
+        Map<String, Object> data = event.data();
+        Long orderId = event.orderId();
+        if (data.get("orderId") instanceof Number number) {
+            orderId = number.longValue();
         }
-        if (!(raw instanceof Map<?, ?> stockRestore)) {
-            throw malformed(event, "stockRestore is not an object");
-        }
-        Long orderId = event.orderId() != null ? event.orderId()
-                : event.data().get("orderId") instanceof Number number ? number.longValue() : null;
         if (orderId == null) {
             throw malformed(event, "no orderId");
         }
-        if (!(stockRestore.get("actor") instanceof String actor) || actor.isBlank()) {
-            throw malformed(event, "stockRestore.actor is missing");
+        if (!(data.get("actor") instanceof String actor) || actor.isBlank()) {
+            throw malformed(event, "actor is missing");
         }
-        if (!(stockRestore.get("lines") instanceof Collection<?> lines)) {
-            throw malformed(event, "stockRestore.lines is missing");
+        if (!(data.get("lines") instanceof Collection<?> lines)) {
+            throw malformed(event, "lines are missing");
         }
         Map<Long, Integer> quantities = new TreeMap<>();
         for (Object entry : lines) {
             if (!(entry instanceof Map<?, ?> line) || !(line.get("productId") instanceof Number productId)
                     || !(line.get("quantity") instanceof Number quantity) || quantity.intValue() <= 0) {
-                throw malformed(event, "invalid stockRestore line " + entry);
+                throw malformed(event, "invalid line " + entry);
             }
             quantities.merge(productId.longValue(), quantity.intValue(), Math::addExact);
         }
-        return Optional.of(new StockRestore(orderId, actor, quantities));
+        return new StockRestore(orderId, actor, quantities);
     }
 
     private static IllegalArgumentException malformed(FeedEvent event, String problem) {

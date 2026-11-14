@@ -143,14 +143,14 @@ class StockLedgerFlowTest extends AbstractFlowTest {
     // --- restore after cancel (contract 3.1) ---------------------------------------------------
 
     @Test
-    void aCancellationWithStockRestoreRestoresTheOrderOnce() {
+    void stockRestoreRequestedRestoresTheOrderOnce() {
         InternalProductDto phone = backend.product("Phone", "Electronics", "10.00", 10);
         InternalProductDto cable = backend.product("Cable", "Accessories", "2.00", 4);
         InternalOrderDto order = backend.order("alice", OrderStatus.PAID, null, phone, 2, cable, 1);
-        FeedEvent cancelled = backend.cancelWithStockRestore(order.id(), "alice");
+        FeedEvent restore = backend.cancelWithStockRestore(order.id(), "alice");
 
         poller.poll();
-        backend.publish(cancelled);
+        backend.publish(restore);
         backend.cancelWithStockRestore(order.id(), "alice");
         poller.poll();
         awaitStockPush();
@@ -164,15 +164,18 @@ class StockLedgerFlowTest extends AbstractFlowTest {
                     assertThat(movement.getQuantityAfter()).isEqualTo(12);
                 });
         assertThat(stockItems.findById(cable.id()).orElseThrow().getQuantity()).isEqualTo(5);
-        assertThat(stockRestores.findById(order.id()).orElseThrow().getEventId()).isEqualTo(cancelled.id());
+        assertThat(stockRestores.findById(order.id()).orElseThrow().getEventId()).isEqualTo(restore.id());
         assertThat(backend.stockOf(phone.id())).isEqualTo(12);
     }
 
     @Test
-    void aCancellationWithoutStockRestoreLeavesTheLedgerAlone() {
+    void orderCancelledNeverRestoresStockEvenWithALegacyStockRestoreField() {
         InternalProductDto phone = backend.product("Phone", "Electronics", "10.00", 10);
         InternalOrderDto order = backend.order("alice", OrderStatus.PAID, null, phone, 2);
         backend.cancelByCustomer(order.id());
+        backend.publish(new FeedEvent(0, UUID.randomUUID(), "order.cancelled", java.time.Instant.now(), order.id(),
+                "alice", java.util.Map.of("orderId", order.id(), "stockRestore", java.util.Map.of("actor", "alice",
+                        "lines", List.of(java.util.Map.of("productId", phone.id(), "quantity", 2))))));
 
         poller.poll();
 

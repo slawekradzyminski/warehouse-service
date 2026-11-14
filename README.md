@@ -112,11 +112,13 @@ change a shipment's state.
 
 `EventFeedPoller` reads the backend's durable domain event feed every
 `warehouse.events.poll-interval` (default `PT5S`):
-`GET /internal/v1/events?after={cursor}&limit=100&types=order.cancelled`, which
+`GET /internal/v1/events?after={cursor}&limit=100&types=order.cancelled,stock.restore-requested`, which
 answers `{events: [{sequence, id, type, occurredAt, orderId, username, data}],
 nextCursor, hasMore}` ordered by `sequence`. A run follows `hasMore` for up to
 ten pages.
 
+- `stock.restore-requested`: restores the cancelled order's stock in the ledger
+  (see "Stock ledger").
 - `order.cancelled`: every parcel of the order that is `AWAITING_PICK` or
   `PICKED` becomes `CANCELLED` (`lastActor = "system"`, `cancelledAt` set). The backend is not called, because the order is already cancelled
   there. `PACKED` and `SHIPPED` shipments are left alone and logged (the
@@ -192,15 +194,17 @@ reason "Order deduction"). Confirm sets the order id on those movements. Release
 writes `ORDER_RESTORED` (actor `system`, reason "Reservation released"). Receipts
 and restocks use actor `warehouse-service`.
 
-**Restores after cancel.** The event feed consumer reads `data.stockRestore` of
-`order.cancelled` (`{"actor","lines":[{"productId","quantity"}]}`). It writes one
-`ORDER_RESTORED` movement per line, with the order id, the event's actor and
-reason "Order cancellation". This happens at most once per order:
-`stock_restores` is keyed by `order_id`, on top of `processed_events`. Events
-without `stockRestore` (legacy rows, shipped orders) leave the ledger alone. The
-restore runs in its own transaction before the shipment handling, so a failing
-shipment change cannot undo it. The feed is not read before the ledger is
-initialised.
+**Restores after cancel.** The event feed consumer also requests the backend's
+internal event `stock.restore-requested`, which the backend records in the cancel
+transaction of an order whose stock was deducted. Its data is
+`{"orderId","actor","lines":[{"productId","quantity"}]}`. Each line becomes one
+`ORDER_RESTORED` movement with the order id, the event's actor and reason
+"Order cancellation". This happens at most once per order: `stock_restores` is
+keyed by `order_id`, on top of `processed_events`. `order.cancelled` never restores
+stock; it only drives the shipment cancellation, and its data is unchanged. The
+restore runs in its own transaction before the event is recorded as processed.
+A transient failure stops the run, and the next run retries the event. The feed
+is not read before the ledger is initialised.
 
 **Projection push.** `StockLevelDispatcher` posts the newest level per product
 to the backend's `POST /internal/v1/inventory/levels`

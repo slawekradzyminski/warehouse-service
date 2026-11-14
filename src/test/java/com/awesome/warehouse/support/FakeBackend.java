@@ -180,20 +180,30 @@ public class FakeBackend implements BackendClient {
     }
 
     /**
-     * Cancellation of an order whose stock was deducted: publishes {@code order.cancelled} with
-     * {@code stockRestore} (the order's lines, the given actor).
+     * Cancellation of an order whose stock was deducted: publishes {@code order.cancelled} (data
+     * unchanged) and the internal {@code stock.restore-requested} with the order's lines and the
+     * given actor, like the backend's cancel transaction.
+     *
+     * @return the restore event
      */
     public FeedEvent cancelWithStockRestore(Long orderId, String actor) {
         InternalOrderDto order = orders.get(orderId);
         InternalOrderDto cancelled = with(order, OrderStatus.CANCELLED, FulfilmentState.CANCELLED);
         orders.put(orderId, cancelled);
-        return publish("order.cancelled", cancelled, stockRestore(cancelled, actor));
+        publish("order.cancelled", cancelled);
+        return publishRestore(cancelled, actor);
     }
 
-    private static Map<String, Object> stockRestore(InternalOrderDto order, String actor) {
-        return Map.of("actor", actor, "lines", order.items().stream()
+    /** The backend's internal {@code stock.restore-requested} for an order. */
+    public FeedEvent publishRestore(InternalOrderDto order, String actor) {
+        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("orderId", order.id());
+        data.put("actor", actor);
+        data.put("lines", order.items().stream()
                 .map(item -> Map.<String, Object>of("productId", item.productId(), "quantity", item.quantity()))
                 .toList());
+        return publish(new FeedEvent(0, UUID.randomUUID(), "stock.restore-requested", Instant.now(), order.id(),
+                order.username(), data));
     }
 
     /** Creates an order; {@code lines} alternate product and quantity. */
@@ -250,17 +260,10 @@ public class FakeBackend implements BackendClient {
 
     /** Appends a domain event for the order to the feed, like the backend's synchronous event listener. */
     public FeedEvent publish(String type, InternalOrderDto order) {
-        return publish(type, order, null);
-    }
-
-    private FeedEvent publish(String type, InternalOrderDto order, Map<String, Object> stockRestore) {
         Map<String, Object> data = new java.util.LinkedHashMap<>();
         data.put("orderId", order.id());
         data.put("status", order.status().name());
         data.put("totalAmount", order.totalAmount());
-        if (stockRestore != null) {
-            data.put("stockRestore", stockRestore);
-        }
         return publish(new FeedEvent(0, UUID.randomUUID(), type, Instant.now(), order.id(), order.username(), data));
     }
 
@@ -424,10 +427,11 @@ public class FakeBackend implements BackendClient {
                 .contains(order.fulfilmentState())) {
             throw new CustomException("Order cannot be cancelled by the warehouse", HttpStatus.CONFLICT);
         }
-        // The stock is restored by the warehouse ledger from the event's stockRestore.
+        // The stock is restored by the warehouse ledger from stock.restore-requested.
         InternalOrderDto updated = with(order, OrderStatus.CANCELLED, FulfilmentState.CANCELLED);
         orders.put(orderId, updated);
-        publish("order.cancelled", updated, stockRestore(updated, updated.username()));
+        publish("order.cancelled", updated);
+        publishRestore(updated, updated.username());
         return updated;
     }
 

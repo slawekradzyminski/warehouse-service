@@ -39,30 +39,29 @@ class StockRestoreConsumerTest {
         when(restores.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
     }
 
-    private static FeedEvent cancelled(Long orderId, Map<String, Object> data) {
-        return new FeedEvent(1, UUID.randomUUID(), "order.cancelled", Instant.EPOCH, orderId, "alice", data);
+    /** A {@code stock.restore-requested} event; {@code data} is its whole data object. */
+    private static FeedEvent requested(Long orderId, Map<String, Object> data) {
+        return new FeedEvent(1, UUID.randomUUID(), "stock.restore-requested", Instant.EPOCH, orderId, "alice", data);
     }
 
-    private static Map<String, Object> withRestore(Object stockRestore) {
-        Map<String, Object> data = new LinkedHashMap<>();
-        data.put("orderId", 42);
-        data.put("stockRestore", stockRestore);
-        return data;
-    }
-
+    /** Data of order 42: {@code lines} alternate product id and quantity. */
     private static Map<String, Object> restore(String actor, Object... lines) {
         List<Map<String, Object>> list = new java.util.ArrayList<>();
         for (int i = 0; i < lines.length; i += 2) {
             list.add(Map.of("productId", lines[i], "quantity", lines[i + 1]));
         }
-        return Map.of("actor", actor, "lines", list);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("orderId", 42);
+        data.put("actor", actor);
+        data.put("lines", list);
+        return data;
     }
 
     @Test
     void everyLineIsRestoredInProductIdOrderWithTheOrderAndTheEventsActor() {
         stock.item(1, 0, 3);
         stock.item(2, 5, 1);
-        FeedEvent event = cancelled(42L, withRestore(restore("alice", 2, 3, 1, 2)));
+        FeedEvent event = requested(42L, (restore("alice", 2, 3, 1, 2)));
 
         assertThat(consumer.restore(event)).isTrue();
 
@@ -90,7 +89,7 @@ class StockRestoreConsumerTest {
         stock.item(1, 0, 1);
         when(restores.existsById(42L)).thenReturn(true);
 
-        assertThat(consumer.restore(cancelled(42L, withRestore(restore("alice", 1, 2))))).isFalse();
+        assertThat(consumer.restore(requested(42L, (restore("alice", 1, 2))))).isFalse();
 
         assertThat(stock.movementRows).isEmpty();
         verify(restores, never()).saveAndFlush(any());
@@ -101,7 +100,7 @@ class StockRestoreConsumerTest {
         stock.item(1, 0, 1);
         when(restores.saveAndFlush(any())).thenThrow(new DataIntegrityViolationException("duplicate"));
 
-        assertThat(consumer.restore(cancelled(42L, withRestore(restore("alice", 1, 2))))).isFalse();
+        assertThat(consumer.restore(requested(42L, (restore("alice", 1, 2))))).isFalse();
     }
 
     @Test
@@ -109,7 +108,7 @@ class StockRestoreConsumerTest {
         stock.item(2, Integer.MAX_VALUE - 1, 1);
         stock.item(3, Integer.MAX_VALUE - 2, 1);
 
-        assertThat(consumer.restore(cancelled(42L, withRestore(restore("alice", 1, 1, 2, 2, 3, 2))))).isTrue();
+        assertThat(consumer.restore(requested(42L, (restore("alice", 1, 1, 2, 2, 3, 2))))).isTrue();
 
         assertThat(stock.movementRows).extracting(StockMovementEntity::getProductId).containsExactly(3L);
         assertThat(stock.itemRows.get(3L).getQuantity()).isEqualTo(Integer.MAX_VALUE);
@@ -117,56 +116,65 @@ class StockRestoreConsumerTest {
     }
 
     @Test
-    void anEventWithoutStockRestoreIsIgnored() {
-        assertThat(consumer.restore(cancelled(42L, Map.of("orderId", 42)))).isFalse();
+    void otherEventTypesNeverRestoreStock() {
+        stock.item(1, 0, 1);
+        Map<String, Object> legacy = new LinkedHashMap<>();
+        legacy.put("orderId", 42);
+        legacy.put("stockRestore", restore("alice", 1, 2));
+        FeedEvent cancelled = new FeedEvent(1, UUID.randomUUID(), "order.cancelled", Instant.EPOCH, 42L, "alice",
+                legacy);
+
+        assertThat(consumer.restore(cancelled)).isFalse();
         stock.readiness.markNotReady();
-        assertThat(consumer.restore(cancelled(42L, null))).isFalse();
+        assertThat(consumer.restore(cancelled)).isFalse();
 
         verifyNoInteractions(restores, stock.transactions);
+        assertThat(stock.itemRows.get(1L).getQuantity()).isZero();
     }
 
     @Test
     void aRestoreWaitsForTheLedger() {
         stock.readiness.markNotReady();
 
-        assertThatThrownBy(() -> consumer.restore(cancelled(42L, withRestore(restore("alice", 1, 1)))))
+        assertThatThrownBy(() -> consumer.restore(requested(42L, (restore("alice", 1, 1)))))
                 .isInstanceOfSatisfying(CustomException.class,
                         e -> assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
         verifyNoInteractions(restores);
     }
 
     @Test
-    void theOrderIdComesFromTheEventOrItsDataAndRepeatedProductsAreSummed() {
-        StockRestoreConsumer.StockRestore fromEvent = StockRestoreConsumer.parse(
-                cancelled(7L, withRestore(restore("bob", 1, 2, 1, 3)))).orElseThrow();
-        StockRestoreConsumer.StockRestore fromData = StockRestoreConsumer.parse(
-                cancelled(null, withRestore(restore("system", 4L, 1)))).orElseThrow();
+    void theOrderIdComesFromTheDataOrTheEventAndRepeatedProductsAreSummed() {
+        Map<String, Object> withoutOrder = restore("system", 4L, 1);
+        withoutOrder.remove("orderId");
 
-        assertThat(fromEvent).isEqualTo(new StockRestoreConsumer.StockRestore(7L, "bob", Map.of(1L, 5)));
-        assertThat(fromData).isEqualTo(new StockRestoreConsumer.StockRestore(42L, "system", Map.of(4L, 1)));
+        assertThat(StockRestoreConsumer.parse(requested(7L, restore("bob", 1, 2, 1, 3))))
+                .isEqualTo(new StockRestoreConsumer.StockRestore(42L, "bob", Map.of(1L, 5)));
+        assertThat(StockRestoreConsumer.parse(requested(7L, withoutOrder)))
+                .isEqualTo(new StockRestoreConsumer.StockRestore(7L, "system", Map.of(4L, 1)));
     }
 
     @Test
-    void aMalformedStockRestoreIsRejected() {
-        Map<String, Object> noOrder = new LinkedHashMap<>();
-        noOrder.put("stockRestore", restore("alice", 1, 1));
-        List<Object> malformed = List.of(
-                "not an object",
-                Map.of("lines", List.of()),
-                Map.of("actor", " ", "lines", List.of()),
-                Map.of("actor", 5, "lines", List.of()),
-                Map.of("actor", "alice"),
-                Map.of("actor", "alice", "lines", List.of("x")),
-                Map.of("actor", "alice", "lines", List.of(Map.of("productId", "1", "quantity", 1))),
-                Map.of("actor", "alice", "lines", List.of(Map.of("productId", 1, "quantity", "1"))),
-                Map.of("actor", "alice", "lines", List.of(Map.of("productId", 1, "quantity", 0))));
+    void malformedRestoreDataIsRejected() {
+        List<Map<String, Object>> malformed = List.of(
+                Map.of("orderId", 42, "lines", List.of()),
+                Map.of("orderId", 42, "actor", " ", "lines", List.of()),
+                Map.of("orderId", 42, "actor", 5, "lines", List.of()),
+                Map.of("orderId", 42, "actor", "alice"),
+                Map.of("orderId", 42, "actor", "alice", "lines", "x"),
+                Map.of("orderId", 42, "actor", "alice", "lines", List.of("x")),
+                Map.of("orderId", 42, "actor", "alice", "lines", List.of(Map.of("productId", "1", "quantity", 1))),
+                Map.of("orderId", 42, "actor", "alice", "lines", List.of(Map.of("productId", 1, "quantity", "1"))),
+                Map.of("orderId", 42, "actor", "alice", "lines", List.of(Map.of("productId", 1, "quantity", 0))));
 
-        for (Object stockRestore : malformed) {
-            assertThatThrownBy(() -> StockRestoreConsumer.parse(cancelled(42L, withRestore(stockRestore))))
-                    .as(String.valueOf(stockRestore)).isInstanceOf(IllegalArgumentException.class);
+        for (Map<String, Object> data : malformed) {
+            assertThatThrownBy(() -> StockRestoreConsumer.parse(requested(42L, data)))
+                    .as(String.valueOf(data)).isInstanceOf(IllegalArgumentException.class);
         }
-        assertThatThrownBy(() -> StockRestoreConsumer.parse(cancelled(null, noOrder)))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("no orderId");
-        assertThat(StockRestoreConsumer.parse(cancelled(42L, withRestore(restore("alice", 1, 1))))).isPresent();
+        assertThatThrownBy(() -> StockRestoreConsumer.parse(requested(null, Map.of("actor", "alice",
+                "lines", List.of())))).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("no orderId");
+        assertThatThrownBy(() -> consumer.restore(requested(42L, Map.of("actor", "alice"))))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(StockRestoreConsumer.parse(requested(42L, restore("alice", 1, 1))).quantities())
+                .containsExactly(Map.entry(1L, 1));
     }
 }

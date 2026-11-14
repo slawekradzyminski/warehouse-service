@@ -89,7 +89,7 @@ class EventFeedPollerTest {
         poller(false).scheduledPoll();
         verify(backend, never()).events(anyLong(), anyInt(), any());
         poller(true).scheduledPoll();
-        verify(backend).events(0, EventFeedPoller.PAGE_SIZE, List.of("order.cancelled"));
+        verify(backend).events(0, EventFeedPoller.PAGE_SIZE, List.of("order.cancelled", "stock.restore-requested"));
     }
 
     @Test
@@ -314,23 +314,39 @@ class EventFeedPollerTest {
     }
 
     @Test
-    void aCancellationRestoresStockBeforeTheShipmentIsFollowed() {
+    void aRestoreEventIsAppliedInItsOwnTransactionBeforeItIsRecorded() {
+        FeedEvent restore = event(1, "stock.restore-requested", 42L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(restore), 1, false));
+        when(stockRestores.restore(restore)).thenAnswer(invocation -> {
+            assertThat(stored).as("recorded only after the restore").isEmpty();
+            return true;
+        });
+
+        assertThat(poller(true).poll()).isEqualTo(1);
+
+        verify(stockRestores).restore(restore);
+        verify(shipments, never()).followOrderCancellation(anyLong());
+        assertThat(stored).containsExactly(restore.id());
+        assertThat(cursor.getLastSequence()).isEqualTo(1);
+    }
+
+    @Test
+    void aCancellationFollowsTheShipmentButNeverRestoresStock() {
         FeedEvent cancelled = event(1, "order.cancelled", 42L);
         when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(cancelled), 1, false));
 
         assertThat(poller(true).poll()).isEqualTo(1);
 
-        org.mockito.InOrder order = org.mockito.Mockito.inOrder(stockRestores, shipments);
-        order.verify(stockRestores).restore(cancelled);
-        order.verify(shipments).followOrderCancellation(42L);
-        assertThat(cursor.getLastSequence()).isEqualTo(1);
+        verify(shipments).followOrderCancellation(42L);
+        verify(stockRestores, never()).restore(any());
     }
 
     @Test
     void aTransientRestoreFailureStopsTheRunBeforeTheEventIsRecorded() {
-        FeedEvent cancelled = event(1, "order.cancelled", 42L);
-        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(cancelled), 1, false));
-        when(stockRestores.restore(cancelled)).thenThrow(new org.springframework.dao.QueryTimeoutException("slow"));
+        FeedEvent restore = event(1, "stock.restore-requested", 42L);
+        FeedEvent later = event(2, "order.cancelled", 43L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(restore, later), 2, false));
+        when(stockRestores.restore(restore)).thenThrow(new org.springframework.dao.QueryTimeoutException("slow"));
 
         assertThat(poller(true).poll()).isZero();
 
@@ -340,24 +356,14 @@ class EventFeedPollerTest {
     }
 
     @Test
-    void aMalformedStockRestoreIsLoggedAndTheEventStillHandled() {
-        FeedEvent cancelled = event(1, "order.cancelled", 42L);
-        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(cancelled), 1, false));
-        when(stockRestores.restore(cancelled)).thenThrow(new IllegalArgumentException("bad stockRestore"));
+    void aMalformedRestoreEventIsLoggedAndRecorded() {
+        FeedEvent restore = event(1, "stock.restore-requested", 42L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(restore), 1, false));
+        when(stockRestores.restore(restore)).thenThrow(new IllegalArgumentException("bad restore"));
 
         assertThat(poller(true).poll()).isEqualTo(1);
 
-        verify(shipments).followOrderCancellation(42L);
-        assertThat(stored).containsExactly(cancelled.id());
-    }
-
-    @Test
-    void otherEventTypesAreNotOfferedToTheStockRestore() {
-        FeedEvent paid = event(1, "order.paid", 42L);
-        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(paid), 1, false));
-
-        poller(true).poll();
-
-        verify(stockRestores, never()).restore(any());
+        assertThat(stored).containsExactly(restore.id());
+        assertThat(cursor.getLastSequence()).isEqualTo(1);
     }
 }
