@@ -11,11 +11,11 @@
 
     <groupId>com.awesome</groupId>
     <artifactId>warehouse-service</artifactId>
-    <version>1.5.1</version>
+    <version>1.6.0</version>
     <packaging>jar</packaging>
 
     <name>warehouse-service</name>
-    <description>Warehouse fulfilment: shipments, returns, suppliers and purchase orders</description>
+    <description>Warehouse fulfilment: shipments, returns, suppliers, purchase orders and the stock ledger</description>
 
     <properties>
         <!-- CVE-2026 Jackson fixes: keep each existing release family on its patched BOM (same as the backend). -->
@@ -381,6 +381,10 @@
                                 <param>com.awesome.warehouse.service.tracking.*</param>
                                 <param>com.awesome.warehouse.service.event.*</param>
                                 <param>com.awesome.warehouse.correlation.*</param>
+                                <param>com.awesome.warehouse.service.stock.StockService</param>
+                                <param>com.awesome.warehouse.service.stock.StockLedger</param>
+                                <param>com.awesome.warehouse.service.stock.ReservationReaper</param>
+                                <param>com.awesome.warehouse.service.stock.StockRestoreConsumer</param>
                             </targetClasses>
                             <targetTests>
                                 <param>com.awesome.warehouse.entity.fulfilment.CarrierTest</param>
@@ -394,6 +398,7 @@
                                 <param>com.awesome.warehouse.service.tracking.*Test</param>
                                 <param>com.awesome.warehouse.service.event.*Test</param>
                                 <param>com.awesome.warehouse.correlation.*Test</param>
+                                <param>com.awesome.warehouse.service.stock.*Test</param>
                             </targetTests>
                             <threads>4</threads>
                             <timestampedReports>false</timestampedReports>

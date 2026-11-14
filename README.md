@@ -1,10 +1,13 @@
 # warehouse-service
 
 Warehouse fulfilment for the Awesome Testing stack: shipments, returns (RMA),
-suppliers and purchase orders. Extracted from `test-secure-backend`; the
-backend keeps users, JWT issuance, products, stock, carts, coupons and orders.
+suppliers, purchase orders and, since 1.6.0, the stock ledger. Extracted from
+`test-secure-backend`; the backend keeps users, JWT issuance, the product
+catalog (with `stock_quantity` as a projection of this service's ledger), carts,
+coupons and orders.
 
-- Contract: `awesome-localstack/docs/WAREHOUSE_SERVICE_CONTRACT.md`
+- Contracts: `awesome-localstack/docs/WAREHOUSE_SERVICE_CONTRACT.md` and
+  `awesome-localstack/docs/INVENTORY_OWNERSHIP_CONTRACT.md` (stock ledger)
 - Business rules: Tier 2 of `test-secure-backend/docs/COMMERCE_AND_FULFILMENT.md`
 - Stack: Spring Boot 4.1 / Java 25, Spring AOT, GraalVM native image
 - Port: 4003 · OpenAPI: `/v3/api-docs` · Health: `/actuator/health` · Metrics: `/actuator/prometheus`
@@ -20,6 +23,7 @@ Paths and bodies are identical to the backend's former endpoints:
 | `GET /api/v1/tracking/{trackingNumber}` | public (no token) |
 | `POST /api/v1/orders/{orderId}/returns`, `GET /api/v1/returns`, `GET /api/v1/returns/{id}` | any authenticated user, own orders only |
 | `/api/v1/admin/returns/**`, `/api/v1/admin/suppliers`, `/api/v1/admin/purchase-orders/**`, `GET /api/v1/admin/inventory/reorder-suggestions` | `ROLE_ADMIN` |
+| `/internal/v1/stock/**` (stock ledger, see below) | the backend only: `Authorization: Bearer <BACKEND_SERVICE_TOKEN>` |
 
 Authentication uses the backend's RS256 access tokens (roles in the `auth`
 claim). The service holds no signing secret: it verifies tokens with the public
@@ -52,13 +56,20 @@ the backend, then persist", so a failed backend call leaves no local change:
   parcel of the order becomes `CANCELLED` (also when the backend reports the
   order as already cancelled, so a retried cancel succeeds); refused with 409
   while another parcel of the order is `PACKED` or later;
-- receive return: `POST inventory/receipts` (`RETURN_RESTOCKED`,
-  `requestId = UUID.nameUUIDFromBytes("return-" + id)`) for resellable lines;
+- receive return: resellable lines are restocked in the local stock ledger
+  (`RETURN_RESTOCKED`, `requestId = UUID.nameUUIDFromBytes("return-" + id)`)
+  in the transaction that marks the return `RECEIVED`;
 - refund return: `POST orders/{id}/refunds` with the proportional amount
   (`requestId = UUID.nameUUIDFromBytes("refund-" + id)`), then the return
   becomes `REFUNDED`; the backend rejects refunds above the order total;
 - approve/reject/refund return: `RETURN_UPDATED` notification;
-- receive purchase order: `POST inventory/receipts` (`PURCHASE_RECEIVED`, the receipt's `requestId`).
+- receive purchase order: local ledger movements (`PURCHASE_RECEIVED`, a
+  request id derived from the purchase order and the receipt's `requestId`),
+  in the transaction that stores the receipt. Since 1.6.0 this service no longer
+  calls the backend's `POST inventory/receipts`;
+- stock levels: `POST inventory/levels` from the stock level outbox, the
+  one-time `GET inventory/export` and the reaper's
+  `GET orders/by-reservation/{id}` (see "Stock ledger").
 
 Backend 4xx responses keep status and message. 5xx, connection failures and a
 rejected service token become 503 `{"message": "Backend unavailable"}`.
@@ -130,7 +141,7 @@ with a database row lock (`order_locks`, `SELECT ... FOR UPDATE`), so the
 returnable-quantity check and the aggregate fulfilment state hold across
 several instances.
 
-Local tables (Flyway `V1`–`V6`, schema `warehouse`): `shipments` (one parcel per
+Local tables (Flyway `V1`–`V7`, schema `warehouse`): `shipments` (one parcel per
 order and location: order id, owner, `location_code`, parcel unit count,
 `simulated` flag), `shipment_lines` (product id, name, category and quantity per
 parcel), `warehouse_locations`, `location_products` (category stocking),
@@ -138,7 +149,97 @@ parcel), `warehouse_locations`, `location_products` (category stocking),
 snapshot for the proportional refund), `return_items` (product id, name and
 unit price snapshot), `suppliers`, `purchase_orders`, `purchase_order_lines`
 (product id and name snapshot), `purchase_receipts`, `notification_outbox` (with the enqueuing request's `correlation_id` and `traceparent`), `order_locks` (with the fulfilment state last mirrored to the backend),
-`event_cursors` (last feed sequence per consumer) and `processed_events` (handled feed event ids).
+`event_cursors` (last feed sequence per consumer), `processed_events` (handled feed event ids) and the
+stock ledger (`V7`): `stock_items`, `stock_movements`, `stock_reservations`, `stock_reservation_lines`,
+`stock_restores` and `stock_level_outbox`.
+
+## Stock ledger
+
+Since 1.6.0 this service owns stock quantities and movements
+(`INVENTORY_OWNERSHIP_CONTRACT.md`). The backend keeps `products.stock_quantity`
+as a projection and calls this service for every stock-changing command. This
+reverses, for stock only, the rule that the backend calls no service; the
+decision is recorded in `awesome-localstack/docs/ARCHITECTURE_DECISIONS.md`.
+
+**API** (`/internal/v1/stock`, caller `BACKEND`). The backend sends
+`Authorization: Bearer <token>`. The token is compared with
+`BACKEND_SERVICE_TOKEN` as SHA-256 digests in constant time. A missing or wrong
+token gets 401 `{"message":"Invalid service token"}`. Without a configured token
+the API answers 404 `{"message":"Not found"}`, the backend's convention for
+disabled internal routes. The JWT chain is not involved.
+
+| Call | Success | Errors |
+| --- | --- | --- |
+| `POST /reservations` `{"reservationId","username","lines":[{"productId","quantity"}]}` | 201 `{"reservationId","lines":[{"productId","quantityAfter","ledgerVersion"}]}`; a repeat with the same lines returns the stored body | 409 `Insufficient stock for product N` (first short product in id order, with `productId`), 409 `reservationId already used with different lines`, 404 `Product N not found` (with `productId`), 400 |
+| `POST /reservations/{id}/confirm` `{"orderId"}` | 200, the reserve body; idempotent for the same order | 409 released, or confirmed for another order; 404 |
+| `POST /reservations/{id}/release` | 200 `{"reservationId","status":"RELEASED"}`; idempotent | 409 for a confirmed reservation; 404 |
+| `POST /adjustments` `{"productId","delta","reason","requestId","actor"}` | 201 movement plus `ledgerVersion`; a replay of `(productId, requestId)` returns the stored movement | the backend's former messages: 409 `requestId already used with different payload`, `Insufficient stock`, `Inventory quantity exceeds supported maximum`; 404 `Product not found`; 400 |
+| `PUT /items/{productId}` `{"initialQuantity","actor","requestId"}` | 201 `{"productId","quantity","ledgerVersion":1}`, or 200 with the existing item unchanged | 400 |
+| `DELETE /items/{productId}` | 204, also when absent | |
+| `GET /items/{productId}` | 200 `{"productId","quantity","ledgerVersion"}` | 404 |
+| `GET /movements?productId=&page=&size=` | 200, the backend's page format, newest first (`createdAt` desc, `id` desc), size clamped to 1–100 | 400 |
+
+Every call answers 503 `{"message":"Stock ledger not initialised"}` until the
+startup import has finished.
+
+**Ledger rules.** Multi-product changes lock `stock_items` rows in product id
+order. Every change writes one `stock_movements` row, increments the item's
+`ledgerVersion` and writes the new level to `stock_level_outbox` in the same
+transaction. Movement JSON matches the backend's former `InventoryMovementDto`:
+nulls are written, and `createdAt` is a zone-less UTC date-time with up to
+microsecond precision. Reservations deduct with `ORDER_DEDUCTED` (actor = username,
+reason "Order deduction"). Confirm sets the order id on those movements. Release
+writes `ORDER_RESTORED` (actor `system`, reason "Reservation released"). Receipts
+and restocks use actor `warehouse-service`.
+
+**Restores after cancel.** The event feed consumer reads `data.stockRestore` of
+`order.cancelled` (`{"actor","lines":[{"productId","quantity"}]}`). It writes one
+`ORDER_RESTORED` movement per line, with the order id, the event's actor and
+reason "Order cancellation". This happens at most once per order:
+`stock_restores` is keyed by `order_id`, on top of `processed_events`. Events
+without `stockRestore` (legacy rows, shipped orders) leave the ledger alone. The
+restore runs in its own transaction before the shipment handling, so a failing
+shipment change cannot undo it. The feed is not read before the ledger is
+initialised.
+
+**Projection push.** `StockLevelDispatcher` posts the newest level per product
+to the backend's `POST /internal/v1/inventory/levels`
+(`{"levels":[{"productId","quantity","ledgerVersion"}]}`). It runs right after
+each commit and then every `WAREHOUSE_STOCK_PUSH_RETRY_INTERVAL`. It uses the
+existing `BackendClient` with `X-Service-Token`, the correlation ids and the
+`traceparent` of the change. Rows are deleted once accepted and retried until
+then. The backend ignores levels that are not newer.
+
+**Reaper.** Every `WAREHOUSE_RESERVATION_REAPER_INTERVAL`, reservations still
+`PENDING_CONFIRMATION` after `WAREHOUSE_RESERVATION_CONFIRM_TIMEOUT` are checked
+with `GET /internal/v1/orders/by-reservation/{id}`. If the backend saved an
+order for the reservation, the reaper confirms it for that order; on 404 it
+releases it with reason "Reservation expired unconfirmed". While the backend is
+unreachable the run stops and the next run retries.
+
+**Startup import.** If `stock_items` and `stock_movements` are empty, the
+service reads `GET /internal/v1/inventory/export?afterProductId=&limit=500`
+page by page and stores everything in one transaction. Items get `ledgerVersion`
+1. Movement ids and timestamps are kept, and the identity moves past the largest
+id. Items that already exist are skipped. One level per item is queued, so the
+projections get version 1. A failed import is retried with backoff (1 s up to
+30 s). Until it succeeds, the stock API answers 503 and the health component
+`stockLedger` reports `IMPORTING`. `/actuator/health/readiness` is then 503.
+`/actuator/health`, which the Compose healthcheck reads over `/dev/tcp`, stays
+200.
+
+**Tracing.** With tracing on, each push is a `PRODUCER` span
+`push stock levels`, parented by the change that wrote the batch's first row.
+Each reaped reservation is a `PRODUCER` span `reap reservation`, parented by the
+checkout request that reserved it. The scheduled runs of the push retry and the
+reaper are not recorded as root spans.
+
+**Metrics.**
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `stock_outbox_pending` | gauge | levels not pushed to the backend yet; grows while the backend is down |
+| `stock_reservations_reaped_total` | counter | unconfirmed reservations the reaper released |
 
 ## Correlation IDs and logging
 
@@ -397,7 +498,7 @@ Profiles:
 | --- | --- | --- | --- |
 | (none) | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` | `http://localhost:4001` | token `local-warehouse-token` |
 | `local` | Postgres `jdbc:postgresql://localhost:5432/testdb?currentSchema=warehouse` (user/password `postgres`) | `http://localhost:4001` | token `local-warehouse-token`, seeds demo suppliers and the demo location split, carrier step `PT30S` |
-| `docker` | Postgres `jdbc:postgresql://postgres:5432/testdb?currentSchema=warehouse` | `http://backend:4001` | `WAREHOUSE_SERVICE_TOKEN` required |
+| `docker` | Postgres `jdbc:postgresql://postgres:5432/testdb?currentSchema=warehouse` | `http://backend:4001` | `WAREHOUSE_SERVICE_TOKEN` and `BACKEND_SERVICE_TOKEN` required |
 | `demo` | – | – | combine as `docker,demo` to seed the demo suppliers and the demo location split; carrier step `PT30S` |
 
 Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.test,
@@ -414,6 +515,11 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 | `WAREHOUSE_NOTIFICATIONS_RETRY_ENABLED` / `_RETRY_INTERVAL` | `warehouse.notifications.*` | `true` / `PT30S` |
 | `WAREHOUSE_CARRIER_ENABLED` / `_STEP_INTERVAL` | `warehouse.carrier.enabled` / `.step-interval` | `true` / `PT2M` (`PT30S` in `local` and `demo`) |
 | `WAREHOUSE_SERVICE_TOKEN` | `warehouse.service-token` | `local-warehouse-token`; no default in `docker` |
+| `BACKEND_SERVICE_TOKEN` | `warehouse.backend-service-token` | unset (stock API answers 404); no default in `docker` |
+| `WAREHOUSE_STOCK_IMPORT_ENABLED` | `warehouse.stock.import-enabled` | `true` (`false` starts from the local tables without the backend export) |
+| `WAREHOUSE_STOCK_PUSH_RETRY_ENABLED` / `WAREHOUSE_STOCK_PUSH_RETRY_INTERVAL` | `warehouse.stock.push-retry-enabled` / `.push-retry-interval` | `true` / `PT5S` |
+| `WAREHOUSE_RESERVATION_REAPER_ENABLED` / `WAREHOUSE_RESERVATION_REAPER_INTERVAL` | `warehouse.stock.reaper-enabled` / `.reservation-reaper-interval` | `true` / `PT30S` |
+| `WAREHOUSE_RESERVATION_CONFIRM_TIMEOUT` | `warehouse.stock.reservation-confirm-timeout` | `PT2M` |
 | `BACKEND_BASE_URL` | `backend.base-url` | `http://localhost:4001` (`http://backend:4001` in `docker`) |
 | `SPRING_DATASOURCE_URL` / `_USERNAME` / `_PASSWORD` | datasource | see profiles |
 | `MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE` | actuator exposure | `health,prometheus` |
@@ -511,4 +617,5 @@ labels and is built on both architectures.
 - PITest: `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage`
   (scope: `Carrier`, `ShipmentService`, `ShipmentAllocator`, `FulfilmentAggregate`, `ReturnService`, `RefundCalculator`,
   `PurchasingService`, `JwtTokenValidator`, `JwtTokenFilter`,
-  `RestBackendClient`, `BackendErrorMapper`, `service.tracking.*`, `service.event.*`, `correlation.*`). Advisory, not a gate.
+  `RestBackendClient`, `BackendErrorMapper`, `service.tracking.*`, `service.event.*`, `correlation.*`,
+  `StockService`, `StockLedger`, `ReservationReaper`, `StockRestoreConsumer`). Advisory, not a gate.

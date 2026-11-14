@@ -2,10 +2,7 @@ package com.awesome.warehouse.endpoints;
 
 import com.awesome.warehouse.client.InternalOrderDto;
 import com.awesome.warehouse.client.InternalProductDto;
-import com.awesome.warehouse.client.InventoryReceiptRequest;
 import com.awesome.warehouse.client.NotificationRequest;
-import com.awesome.warehouse.client.ReceiptLine;
-import com.awesome.warehouse.client.ReceiptType;
 import com.awesome.warehouse.dto.order.OrderStatus;
 import com.awesome.warehouse.dto.order.PageDto;
 import com.awesome.warehouse.dto.returns.CreateReturnDto;
@@ -15,6 +12,7 @@ import com.awesome.warehouse.dto.returns.RejectReturnDto;
 import com.awesome.warehouse.dto.returns.ReturnDto;
 import com.awesome.warehouse.dto.returns.ReturnItemRequestDto;
 import com.awesome.warehouse.entity.returns.ItemCondition;
+import com.awesome.warehouse.entity.stock.InventoryMovementType;
 import com.awesome.warehouse.entity.returns.ReturnReason;
 import com.awesome.warehouse.entity.returns.ReturnStatus;
 import com.awesome.warehouse.support.AbstractFlowTest;
@@ -55,16 +53,22 @@ class ReturnFlowTest extends AbstractFlowTest {
         // 120.00 of goods × 126/140 = 108.00; ignoring the coupon would refund 120.00
         assertThat(requested.getEstimatedRefund()).isEqualByComparingTo("108.00");
         assertThat(received.getStatus()).isEqualTo(ReturnStatus.RECEIVED);
+        awaitStockPush();
         assertThat(backend.stockOf(phone.id())).isEqualTo(11);
         assertThat(backend.stockOf(cable.id())).isEqualTo(10);
-        assertThat(backend.receipts()).singleElement().satisfies(receipt -> {
-            assertThat(receipt.type()).isEqualTo(ReceiptType.RETURN_RESTOCKED);
-            assertThat(receipt.requestId()).isEqualTo(UUID.nameUUIDFromBytes(
-                    ("return-" + requested.getId()).getBytes(StandardCharsets.UTF_8)));
-            assertThat(receipt.orderId()).isEqualTo(order.id());
-            assertThat(receipt.reference()).isEqualTo("Return #" + requested.getId());
-            assertThat(receipt.lines()).containsExactly(new ReceiptLine(phone.id(), 1));
-        });
+        assertThat(movementsOf(phone.id()))
+                .filteredOn(movement -> movement.getType() == InventoryMovementType.RETURN_RESTOCKED)
+                .singleElement().satisfies(movement -> {
+                    assertThat(movement.getRequestId()).isEqualTo(UUID.nameUUIDFromBytes(
+                            ("return-" + requested.getId()).getBytes(StandardCharsets.UTF_8)));
+                    assertThat(movement.getOrderId()).isEqualTo(order.id());
+                    assertThat(movement.getActor()).isEqualTo("warehouse-service");
+                    assertThat(movement.getReason()).isEqualTo("Return #" + requested.getId());
+                    assertThat(movement.getDelta()).isEqualTo(1);
+                    assertThat(movement.getQuantityAfter()).isEqualTo(11);
+                });
+        assertThat(movementsOf(cable.id()))
+                .noneMatch(movement -> movement.getType() == InventoryMovementType.RETURN_RESTOCKED);
         assertThat(refunded.getStatus()).isEqualTo(ReturnStatus.REFUNDED);
         assertThat(refunded.getRefundAmount()).isEqualByComparingTo("108.00");
         assertThat(sentNotifications()).extracting(n -> n.properties().get("status"))
@@ -168,26 +172,29 @@ class ReturnFlowTest extends AbstractFlowTest {
     }
 
     @Test
-    void failedRestockLeavesTheReturnApprovedAndARetryBooksStockOnce() {
+    void restockIsBookedOnceInTheLocalLedgerWhileTheBackendIsDown() {
         InternalProductDto product = backend.product("Phone", "Electronics", "10.00", 10);
         InternalOrderDto order = backend.order("client", OrderStatus.DELIVERED, null, product, 1);
         ReturnDto requested = requestReturn(order, List.of(item(product, 1))).as(ReturnDto.class);
         postJson(ADMIN_RETURNS + "/" + requested.getId() + "/approve", null, adminToken);
         ReceiveReturnDto inspection = new ReceiveReturnDto(List.of(new ReceiveItemDto(product.id(), ItemCondition.RESELLABLE)));
+        awaitStockPush();
 
         backend.setAvailable(false);
-        Response failed = postJson(ADMIN_RETURNS + "/" + requested.getId() + "/receive", inspection, adminToken);
+        Response received = postJson(ADMIN_RETURNS + "/" + requested.getId() + "/receive", inspection, adminToken);
+        Response repeated = postJson(ADMIN_RETURNS + "/" + requested.getId() + "/receive", inspection, adminToken);
+        awaitStockPush();
+        int projectionWhileDown = backend.stockOf(product.id());
         backend.setAvailable(true);
-        ReturnDto stillApproved = getJson(ADMIN_RETURNS + "/" + requested.getId(), adminToken).as(ReturnDto.class);
-        Response retried = postJson(ADMIN_RETURNS + "/" + requested.getId() + "/receive", inspection, adminToken);
+        stockLevelDispatcher.dispatchPending();
 
-        assertThat(failed.status()).isEqualTo(503);
-        assertThat(stillApproved.getStatus()).isEqualTo(ReturnStatus.APPROVED);
-        assertThat(stillApproved.getItems().getFirst().getCondition()).isNull();
-        assertThat(retried.status()).isEqualTo(200);
+        assertThat(received.status()).isEqualTo(200);
+        assertThat(received.as(ReturnDto.class).getStatus()).isEqualTo(ReturnStatus.RECEIVED);
+        assertThat(repeated.status()).isEqualTo(409);
+        assertThat(projectionWhileDown).isEqualTo(10);
         assertThat(backend.stockOf(product.id())).isEqualTo(11);
-        assertThat(backend.receipts()).extracting(InventoryReceiptRequest::type)
-                .containsExactly(ReceiptType.RETURN_RESTOCKED);
+        assertThat(movementsOf(product.id())).extracting(movement -> movement.getType())
+                .containsExactly(InventoryMovementType.INITIAL_STOCK, InventoryMovementType.RETURN_RESTOCKED);
     }
 
     private ReturnItemRequestDto item(InternalProductDto product, int quantity) {

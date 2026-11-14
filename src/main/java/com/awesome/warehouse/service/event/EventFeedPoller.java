@@ -10,6 +10,8 @@ import com.awesome.warehouse.entity.event.ProcessedEventEntity;
 import com.awesome.warehouse.repository.event.EventCursorRepository;
 import com.awesome.warehouse.repository.event.ProcessedEventRepository;
 import com.awesome.warehouse.service.fulfilment.ShipmentService;
+import com.awesome.warehouse.service.stock.StockReadiness;
+import com.awesome.warehouse.service.stock.StockRestoreConsumer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -26,14 +28,20 @@ import java.util.Map;
 /**
  * Pulls the backend's domain event feed ({@code GET /internal/v1/events}) from the stored
  * cursor and reacts to the events this service cares about:
- * {@code order.cancelled} cancels the order's shipment while it is AWAITING_PICK or PICKED.
+ * {@code order.cancelled} cancels the order's shipment while it is AWAITING_PICK or PICKED and,
+ * when the event carries {@code stockRestore}, restores the order's stock in the ledger
+ * ({@link StockRestoreConsumer}, once per order). The feed is not read before the stock ledger
+ * is initialised, so no restore is skipped during the startup import.
  *
  * <p>Each event is handled in its own local transaction that locks the cursor row (so
  * several instances never handle one event concurrently), skips events already in
  * {@code processed_events}, applies the change, records the event as processed and
  * advances the cursor. A backend outage ends the run; the next tick resumes from the
  * cursor. An event whose handling fails is logged with its id and skipped, so one bad
- * event never blocks the feed. {@code ShipmentReconciler} remains as a slow safety net.
+ * event never blocks the feed. The stock restore runs first, in its own transaction, so a
+ * failing shipment change cannot undo it; a restore that fails for a transient reason stops the
+ * run (the next run retries the event), a malformed {@code stockRestore} is logged and skipped.
+ * {@code ShipmentReconciler} remains as a slow safety net.
  *
  * <p>Each scheduled run has its own generated correlation ids; while an event is handled the
  * MDC (and so every log line and backend call made for it) carries the event's
@@ -58,6 +66,8 @@ public class EventFeedPoller {
 
     private final BackendClient backendClient;
     private final ShipmentService shipmentService;
+    private final StockRestoreConsumer stockRestores;
+    private final StockReadiness stockReadiness;
     private final EventCursorRepository cursors;
     private final ProcessedEventRepository processedEvents;
     private final TransactionTemplate transaction;
@@ -66,12 +76,15 @@ public class EventFeedPoller {
     private final boolean enabled;
 
     public EventFeedPoller(BackendClient backendClient, ShipmentService shipmentService,
+                           StockRestoreConsumer stockRestores, StockReadiness stockReadiness,
                            EventCursorRepository cursors, ProcessedEventRepository processedEvents,
                            PlatformTransactionManager transactionManager, Clock warehouseClock,
                            TracingSupport tracing,
                            @Value("${warehouse.events.enabled:true}") boolean enabled) {
         this.backendClient = backendClient;
         this.shipmentService = shipmentService;
+        this.stockRestores = stockRestores;
+        this.stockReadiness = stockReadiness;
         this.cursors = cursors;
         this.processedEvents = processedEvents;
         this.transaction = new TransactionTemplate(transactionManager);
@@ -95,6 +108,10 @@ public class EventFeedPoller {
      * @return the number of events handled in this run (events seen before are not counted)
      */
     public synchronized int poll() {
+        if (!stockReadiness.isReady()) {
+            log.debug("Event feed not read: the stock ledger is not initialised yet");
+            return 0;
+        }
         ensureCursor();
         int handled = 0;
         for (int pageNumber = 0; pageNumber < MAX_PAGES_PER_RUN; pageNumber++) {
@@ -108,7 +125,7 @@ public class EventFeedPoller {
             }
             for (FeedEvent event : page.events()) {
                 Outcome outcome = tracing.consume("process " + event.type(), event.requestId(), event.traceId(),
-                        event.spanId(), spanTags(event), () -> process(event));
+                        event.spanId(), spanTags(event), () -> restoreThenProcess(event));
                 if (outcome == Outcome.STOPPED) {
                     return handled;
                 }
@@ -134,6 +151,28 @@ public class EventFeedPoller {
     static Map<String, String> spanTags(FeedEvent event) {
         return Map.of("event.id", String.valueOf(event.id()), "event.type", String.valueOf(event.type()),
                 "event.sequence", Long.toString(event.sequence()));
+    }
+
+    private Outcome restoreThenProcess(FeedEvent event) {
+        if (ORDER_CANCELLED.equals(event.type()) && !restoreStock(event)) {
+            return Outcome.STOPPED;
+        }
+        return process(event);
+    }
+
+    /** @return false when the restore failed for a transient reason and the run must stop */
+    private boolean restoreStock(FeedEvent event) {
+        try {
+            stockRestores.restore(event);
+            return true;
+        } catch (IllegalArgumentException e) {
+            log.error("Event {} has an invalid stockRestore; its stock is not restored: {}", event.id(), e.getMessage());
+            return true;
+        } catch (RuntimeException e) {
+            log.warn("Stock restore of event {} failed; the run stops and retries it next time: {}", event.id(),
+                    e.getMessage());
+            return false;
+        }
     }
 
     private Outcome process(FeedEvent event) {

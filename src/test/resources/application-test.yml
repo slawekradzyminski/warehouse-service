@@ -15,3 +15,8 @@ warehouse:
     retry-enabled: false
   carrier:
     enabled: false
+  # The flow tests drive pushes and the reaper themselves; the import runs against FakeBackend.
+  stock:
+    push-retry-enabled: false
+    reaper-enabled: false
+  backend-service-token: test-backend-service-token

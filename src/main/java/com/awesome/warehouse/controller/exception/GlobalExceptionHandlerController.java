@@ -1,6 +1,7 @@
 package com.awesome.warehouse.controller.exception;
 
 import com.awesome.warehouse.dto.ErrorDto;
+import com.awesome.warehouse.dto.stock.StockErrorDto;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -24,6 +25,15 @@ public class GlobalExceptionHandlerController {
                 .status(ex.getHttpStatus())
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(new ErrorDto(ex.getMessage()));
+    }
+
+    /** Stock API errors that name the product: {@code {"message":...,"productId":1}}. */
+    @ExceptionHandler(StockException.class)
+    public ResponseEntity<StockErrorDto> handleStockException(StockException ex) {
+        return ResponseEntity
+                .status(ex.getHttpStatus())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(new StockErrorDto(ex.getMessage(), ex.getProductId()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

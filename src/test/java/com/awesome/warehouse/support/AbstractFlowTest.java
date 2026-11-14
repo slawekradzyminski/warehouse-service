@@ -55,14 +55,35 @@ public abstract class AbstractFlowTest {
     @Autowired protected com.awesome.warehouse.repository.fulfilment.WarehouseLocationRepository locationRepository;
     @Autowired protected com.awesome.warehouse.repository.fulfilment.LocationProductRepository stockingRepository;
 
+    @Autowired protected com.awesome.warehouse.service.stock.StockService stockService;
+    @Autowired protected com.awesome.warehouse.service.stock.StockLevelDispatcher stockLevelDispatcher;
+    @Autowired protected com.awesome.warehouse.service.stock.StockReadiness stockReadiness;
+    @Autowired protected com.awesome.warehouse.repository.stock.StockItemRepository stockItems;
+    @Autowired protected com.awesome.warehouse.repository.stock.StockMovementRepository stockMovements;
+    @Autowired protected com.awesome.warehouse.repository.stock.StockReservationRepository stockReservations;
+    @Autowired protected com.awesome.warehouse.repository.stock.StockRestoreRepository stockRestores;
+    @Autowired protected com.awesome.warehouse.repository.stock.StockLevelOutboxRepository stockLevelOutbox;
+
     @BeforeEach
     void resetBackend() {
         backend.reset();
+        if (!stockReadiness.awaitReady(java.time.Duration.ofSeconds(10))) {
+            throw new IllegalStateException("Stock ledger import did not finish");
+        }
+        // Like the backend, product creation creates the product's stock item in the ledger.
+        backend.onProductCreated(product -> stockService.createItem(product.id(),
+                new com.awesome.warehouse.dto.stock.InitialStockRequestDto(product.stockQuantity(), "admin", null)));
     }
 
     @AfterEach
     void cleanDatabase() {
         awaitNotificationDispatch();
+        awaitStockPush();
+        stockLevelOutbox.deleteAll();
+        stockRestores.deleteAll();
+        stockReservations.deleteAll();
+        stockMovements.deleteAll();
+        stockItems.deleteAll();
         receiptRepository.deleteAll();
         purchaseOrderRepository.deleteAll();
         supplierRepository.deleteAll();
@@ -111,6 +132,20 @@ public abstract class AbstractFlowTest {
         if (!notificationDispatcher.awaitIdle(java.time.Duration.ofSeconds(10))) {
             throw new IllegalStateException("Notification dispatch did not finish");
         }
+    }
+
+    /** Waits for the stock level pushes queued by the requests so far (the dispatcher's own thread). */
+    protected void awaitStockPush() {
+        if (!stockLevelDispatcher.awaitIdle(java.time.Duration.ofSeconds(10))) {
+            throw new IllegalStateException("Stock level push did not finish");
+        }
+    }
+
+    /** A product's ledger movements, oldest first. */
+    protected java.util.List<com.awesome.warehouse.entity.stock.StockMovementEntity> movementsOf(Long productId) {
+        return stockMovements.findAll(org.springframework.data.domain.Sort.by("id")).stream()
+                .filter(movement -> movement.getProductId().equals(productId))
+                .toList();
     }
 
     /** The notifications the backend accepted, once the queued dispatches have finished. */

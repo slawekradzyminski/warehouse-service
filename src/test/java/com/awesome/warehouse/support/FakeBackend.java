@@ -9,12 +9,14 @@ import com.awesome.warehouse.client.InternalAddressDto;
 import com.awesome.warehouse.client.InternalOrderDto;
 import com.awesome.warehouse.client.InternalOrderItemDto;
 import com.awesome.warehouse.client.InternalProductDto;
-import com.awesome.warehouse.client.InventoryReceiptRequest;
-import com.awesome.warehouse.client.InventoryReceiptResponse;
+import com.awesome.warehouse.client.ExportedStockItem;
+import com.awesome.warehouse.client.InventoryExportPage;
 import com.awesome.warehouse.client.NotificationRequest;
 import com.awesome.warehouse.client.JwkSet;
 import com.awesome.warehouse.client.OrderRefundRequest;
-import com.awesome.warehouse.client.ReceiptLine;
+import com.awesome.warehouse.client.StockLevel;
+import com.awesome.warehouse.client.StockLevelsRequest;
+import com.awesome.warehouse.client.StockLevelsResponse;
 import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.dto.order.OrderStatus;
 import com.awesome.warehouse.dto.order.PageDto;
@@ -29,6 +31,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,8 +40,10 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * In-memory backend implementing the internal-API rules from the contract
- * (fulfilment transitions, warehouse-cancel, idempotent receipts, the domain
- * event feed), so flow tests run without Docker or HTTP.
+ * (fulfilment transitions, warehouse-cancel, the domain event feed, the stock
+ * projection fed by level pushes, the ledger export), so flow tests run without
+ * Docker or HTTP. Like the real backend, creating a product calls the warehouse
+ * stock API ({@link #onProductCreated}).
  */
 public class FakeBackend implements BackendClient {
 
@@ -52,7 +57,13 @@ public class FakeBackend implements BackendClient {
     private final AtomicLong ids = new AtomicLong(1000);
     private final Map<Long, InternalOrderDto> orders = new ConcurrentHashMap<>();
     private final Map<Long, InternalProductDto> products = new ConcurrentHashMap<>();
-    private final Map<UUID, InventoryReceiptRequest> receipts = new ConcurrentHashMap<>();
+    private final Map<Long, Long> ledgerVersions = new ConcurrentHashMap<>();
+    private final List<StockLevelsRequest> levelPushes = new CopyOnWriteArrayList<>();
+    private final List<CorrelatedCall> levelPushCalls = new CopyOnWriteArrayList<>();
+    private final List<ExportedStockItem> export = new CopyOnWriteArrayList<>();
+    private final Map<UUID, Long> ordersByReservation = new ConcurrentHashMap<>();
+    private volatile java.util.function.Consumer<InternalProductDto> productListener = product -> { };
+    private volatile boolean levelsDown;
     private final List<NotificationRequest> notifications = new CopyOnWriteArrayList<>();
     private final List<String> calls = new CopyOnWriteArrayList<>();
     private final List<CorrelatedCall> correlatedCalls = new CopyOnWriteArrayList<>();
@@ -69,7 +80,12 @@ public class FakeBackend implements BackendClient {
     public void reset() {
         orders.clear();
         products.clear();
-        receipts.clear();
+        ledgerVersions.clear();
+        levelPushes.clear();
+        levelPushCalls.clear();
+        export.clear();
+        ordersByReservation.clear();
+        levelsDown = false;
         notifications.clear();
         calls.clear();
         correlatedCalls.clear();
@@ -116,14 +132,68 @@ public class FakeBackend implements BackendClient {
         this.available = available;
     }
 
+    /** Called for every created product, like the backend's call to PUT /internal/v1/stock/items/{id}. */
+    public void onProductCreated(java.util.function.Consumer<InternalProductDto> listener) {
+        this.productListener = listener;
+    }
+
     public InternalProductDto product(String name, String category, String price, int stock) {
         InternalProductDto product = new InternalProductDto(ids.incrementAndGet(), name, category, new BigDecimal(price), stock);
         products.put(product.id(), product);
+        productListener.accept(product);
         return product;
     }
 
+    /** The projection's stock quantity (fed by the warehouse's level pushes). */
     public int stockOf(Long productId) {
         return products.get(productId).stockQuantity();
+    }
+
+    /** The projection's ledger version; 0 before the first push. */
+    public long ledgerVersionOf(Long productId) {
+        return ledgerVersions.getOrDefault(productId, 0L);
+    }
+
+    public List<StockLevelsRequest> levelPushes() {
+        return List.copyOf(levelPushes);
+    }
+
+    /** Every level push attempt with the MDC correlation ids it was made under. */
+    public List<CorrelatedCall> levelPushCalls() {
+        return List.copyOf(levelPushCalls);
+    }
+
+    /** Makes POST levels answer 503 while every other call works. */
+    public void setLevelsDown(boolean levelsDown) {
+        this.levelsDown = levelsDown;
+    }
+
+    /** The backend's former ledger, as GET /internal/v1/inventory/export pages it. */
+    public void setExport(List<ExportedStockItem> items) {
+        export.clear();
+        export.addAll(items);
+    }
+
+    /** The order the backend saved for a checkout reservation. */
+    public void saveOrderForReservation(UUID reservationId, Long orderId) {
+        ordersByReservation.put(reservationId, orderId);
+    }
+
+    /**
+     * Cancellation of an order whose stock was deducted: publishes {@code order.cancelled} with
+     * {@code stockRestore} (the order's lines, the given actor).
+     */
+    public FeedEvent cancelWithStockRestore(Long orderId, String actor) {
+        InternalOrderDto order = orders.get(orderId);
+        InternalOrderDto cancelled = with(order, OrderStatus.CANCELLED, FulfilmentState.CANCELLED);
+        orders.put(orderId, cancelled);
+        return publish("order.cancelled", cancelled, stockRestore(cancelled, actor));
+    }
+
+    private static Map<String, Object> stockRestore(InternalOrderDto order, String actor) {
+        return Map.of("actor", actor, "lines", order.items().stream()
+                .map(item -> Map.<String, Object>of("productId", item.productId(), "quantity", item.quantity()))
+                .toList());
     }
 
     /** Creates an order; {@code lines} alternate product and quantity. */
@@ -180,10 +250,17 @@ public class FakeBackend implements BackendClient {
 
     /** Appends a domain event for the order to the feed, like the backend's synchronous event listener. */
     public FeedEvent publish(String type, InternalOrderDto order) {
+        return publish(type, order, null);
+    }
+
+    private FeedEvent publish(String type, InternalOrderDto order, Map<String, Object> stockRestore) {
         Map<String, Object> data = new java.util.LinkedHashMap<>();
         data.put("orderId", order.id());
         data.put("status", order.status().name());
         data.put("totalAmount", order.totalAmount());
+        if (stockRestore != null) {
+            data.put("stockRestore", stockRestore);
+        }
         return publish(new FeedEvent(0, UUID.randomUUID(), type, Instant.now(), order.id(), order.username(), data));
     }
 
@@ -206,10 +283,6 @@ public class FakeBackend implements BackendClient {
 
     public List<NotificationRequest> notifications() {
         return List.copyOf(notifications);
-    }
-
-    public Collection<InventoryReceiptRequest> receipts() {
-        return List.copyOf(receipts.values());
     }
 
     public List<String> calls() {
@@ -351,12 +424,10 @@ public class FakeBackend implements BackendClient {
                 .contains(order.fulfilmentState())) {
             throw new CustomException("Order cannot be cancelled by the warehouse", HttpStatus.CONFLICT);
         }
-        for (InternalOrderItemDto item : order.items()) {
-            adjustStock(item.productId(), item.quantity());
-        }
+        // The stock is restored by the warehouse ledger from the event's stockRestore.
         InternalOrderDto updated = with(order, OrderStatus.CANCELLED, FulfilmentState.CANCELLED);
         orders.put(orderId, updated);
-        publish("order.cancelled", updated);
+        publish("order.cancelled", updated, stockRestore(updated, updated.username()));
         return updated;
     }
 
@@ -373,18 +444,45 @@ public class FakeBackend implements BackendClient {
     }
 
     @Override
-    public synchronized InventoryReceiptResponse receiveInventory(InventoryReceiptRequest request) {
-        call("POST receipts " + request.type());
-        if (receipts.putIfAbsent(request.requestId(), request) == null) {
-            for (ReceiptLine line : request.lines()) {
-                if (!products.containsKey(line.productId())) {
-                    receipts.remove(request.requestId());
-                    throw new CustomException("Product not found", HttpStatus.NOT_FOUND);
-                }
-                adjustStock(line.productId(), line.quantity());
+    public synchronized StockLevelsResponse pushStockLevels(StockLevelsRequest request) {
+        // Not listed in calls(): pushes run asynchronously after every ledger change, so they would
+        // interleave with the calls of the request a test inspects. They are kept in levelPushes().
+        awaitLatencyAndAvailability();
+        levelPushCalls.add(new CorrelatedCall("POST levels " + request.levels().size(), MDC.get("requestId"),
+                MDC.get("traceId")));
+        if (levelsDown) {
+            throw BackendErrorMapper.unavailable(new IllegalStateException("fake levels down"));
+        }
+        levelPushes.add(request);
+        int applied = 0;
+        for (StockLevel level : request.levels()) {
+            InternalProductDto product = products.get(level.productId());
+            if (product != null && level.ledgerVersion() > ledgerVersionOf(level.productId())) {
+                products.put(product.id(), new InternalProductDto(product.id(), product.name(), product.category(),
+                        product.price(), level.quantity()));
+                ledgerVersions.put(product.id(), level.ledgerVersion());
+                applied++;
             }
         }
-        return new InventoryReceiptResponse(List.of(ids.incrementAndGet()));
+        return new StockLevelsResponse(applied, request.levels().size() - applied);
+    }
+
+    @Override
+    public InventoryExportPage exportInventory(Long afterProductId, int limit) {
+        call("GET export after " + afterProductId);
+        List<ExportedStockItem> page = export.stream()
+                .filter(item -> afterProductId == null || item.productId() > afterProductId)
+                .sorted(Comparator.comparing(ExportedStockItem::productId))
+                .limit(limit)
+                .toList();
+        boolean more = export.stream().anyMatch(item -> !page.isEmpty() && item.productId() > page.getLast().productId());
+        return new InventoryExportPage(page, more ? page.getLast().productId() : null);
+    }
+
+    @Override
+    public Optional<Long> orderIdByReservation(UUID reservationId) {
+        call("GET order by reservation " + reservationId);
+        return Optional.ofNullable(ordersByReservation.get(reservationId));
     }
 
     @Override
@@ -399,6 +497,12 @@ public class FakeBackend implements BackendClient {
     }
 
     private void call(String description) {
+        awaitLatencyAndAvailability();
+        calls.add(description);
+        correlatedCalls.add(new CorrelatedCall(description, MDC.get("requestId"), MDC.get("traceId")));
+    }
+
+    private void awaitLatencyAndAvailability() {
         if (latencyMillis > 0) {
             try {
                 Thread.sleep(latencyMillis);
@@ -409,8 +513,6 @@ public class FakeBackend implements BackendClient {
         if (!available) {
             throw BackendErrorMapper.unavailable(new IllegalStateException("fake backend down"));
         }
-        calls.add(description);
-        correlatedCalls.add(new CorrelatedCall(description, MDC.get("requestId"), MDC.get("traceId")));
     }
 
     private InternalOrderDto getOrderQuietly(long orderId) {
@@ -419,11 +521,6 @@ public class FakeBackend implements BackendClient {
             throw new CustomException("Order not found", HttpStatus.NOT_FOUND);
         }
         return order;
-    }
-
-    private void adjustStock(Long productId, int delta) {
-        products.computeIfPresent(productId, (id, p) ->
-                new InternalProductDto(p.id(), p.name(), p.category(), p.price(), p.stockQuantity() + delta));
     }
 
     public static InternalOrderDto with(InternalOrderDto o, OrderStatus status, FulfilmentState state) {

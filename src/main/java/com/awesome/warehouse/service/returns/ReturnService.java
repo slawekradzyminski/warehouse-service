@@ -3,10 +3,7 @@ package com.awesome.warehouse.service.returns;
 import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.InternalOrderDto;
 import com.awesome.warehouse.client.InternalOrderItemDto;
-import com.awesome.warehouse.client.InventoryReceiptRequest;
 import com.awesome.warehouse.client.OrderRefundRequest;
-import com.awesome.warehouse.client.ReceiptLine;
-import com.awesome.warehouse.client.ReceiptType;
 import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.dto.order.OrderStatus;
 import com.awesome.warehouse.dto.returns.CreateReturnDto;
@@ -19,9 +16,11 @@ import com.awesome.warehouse.entity.returns.ItemCondition;
 import com.awesome.warehouse.entity.returns.ReturnItemEntity;
 import com.awesome.warehouse.entity.returns.ReturnRequestEntity;
 import com.awesome.warehouse.entity.returns.ReturnStatus;
+import com.awesome.warehouse.entity.stock.InventoryMovementType;
 import com.awesome.warehouse.repository.fulfilment.ShipmentRepository;
 import com.awesome.warehouse.repository.returns.ReturnRequestRepository;
 import com.awesome.warehouse.service.notification.CustomerMessages;
+import com.awesome.warehouse.service.stock.StockLedger;
 import lombok.RequiredArgsConstructor;
 import com.awesome.warehouse.service.notification.NotificationOutbox;
 import org.springframework.data.domain.Page;
@@ -56,6 +55,7 @@ public class ReturnService {
     private final BackendClient backendClient;
     private final OrderLocks orderLocks;
     private final NotificationOutbox notificationOutbox;
+    private final StockLedger stockLedger;
     private final Clock warehouseClock;
 
     /**
@@ -180,8 +180,9 @@ public class ReturnService {
 
     /**
      * Records the inspection result. The request must name every returned
-     * product exactly once; resellable units are restocked on the backend
-     * (idempotently, keyed by the return) before the return is marked RECEIVED.
+     * product exactly once; resellable units are restocked in the stock ledger
+     * (RETURN_RESTOCKED, request id keyed by the return) in the transaction that
+     * marks the return RECEIVED.
      */
     @Transactional
     public ReturnDto receive(Long id, List<ReceiveItemDto> conditions, String actor) {
@@ -200,14 +201,13 @@ public class ReturnService {
             throw new CustomException(
                     "Conditions must cover exactly the returned products " + items.keySet(), HttpStatus.BAD_REQUEST);
         }
-        List<ReceiptLine> restock = items.values().stream()
+        Map<Long, Integer> restock = items.values().stream()
                 .filter(item -> byProduct.get(item.getProductId()) == ItemCondition.RESELLABLE)
-                .map(item -> new ReceiptLine(item.getProductId(), item.getQuantity()))
-                .toList();
+                .collect(Collectors.toMap(ReturnItemEntity::getProductId, ReturnItemEntity::getQuantity,
+                        Integer::sum, TreeMap::new));
         if (!restock.isEmpty()) {
-            backendClient.receiveInventory(new InventoryReceiptRequest(
-                    restockRequestId(request.getId()), ReceiptType.RETURN_RESTOCKED, request.getOrderId(),
-                    "Return #" + request.getId(), restock));
+            stockLedger.receive(restock, InventoryMovementType.RETURN_RESTOCKED, request.getOrderId(),
+                    "Return #" + request.getId(), restockRequestId(request.getId()));
         }
         items.forEach((productId, item) -> item.setCondition(byProduct.get(productId)));
         request.setStatus(ReturnStatus.RECEIVED);
@@ -235,7 +235,7 @@ public class ReturnService {
         return UUID.nameUUIDFromBytes(("refund-" + returnId).getBytes(StandardCharsets.UTF_8));
     }
 
-    /** Same id for every attempt to restock one return, so the backend books it once. */
+    /** The request id of a return's restock movements (the id the backend receipts used). */
     static UUID restockRequestId(Long returnId) {
         return UUID.nameUUIDFromBytes(("return-" + returnId).getBytes(StandardCharsets.UTF_8));
     }

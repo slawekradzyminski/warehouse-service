@@ -9,6 +9,8 @@ import com.awesome.warehouse.entity.event.ProcessedEventEntity;
 import com.awesome.warehouse.repository.event.EventCursorRepository;
 import com.awesome.warehouse.repository.event.ProcessedEventRepository;
 import com.awesome.warehouse.service.fulfilment.ShipmentService;
+import com.awesome.warehouse.service.stock.StockReadiness;
+import com.awesome.warehouse.service.stock.StockRestoreConsumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -48,6 +50,8 @@ class EventFeedPollerTest {
 
     private final BackendClient backend = mock(BackendClient.class);
     private final ShipmentService shipments = mock(ShipmentService.class);
+    private final StockRestoreConsumer stockRestores = mock(StockRestoreConsumer.class);
+    private final StockReadiness stockReadiness = mock(StockReadiness.class);
     private final EventCursorRepository cursors = mock(EventCursorRepository.class);
     private final ProcessedEventRepository processed = mock(ProcessedEventRepository.class);
     private final PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
@@ -57,6 +61,7 @@ class EventFeedPollerTest {
     @BeforeEach
     void setUp() {
         when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        when(stockReadiness.isReady()).thenReturn(true);
         when(cursors.existsById(EventFeedPoller.CONSUMER)).thenReturn(true);
         when(cursors.findById(EventFeedPoller.CONSUMER)).thenAnswer(invocation -> Optional.of(cursor));
         when(cursors.findForUpdate(EventFeedPoller.CONSUMER)).thenAnswer(invocation -> Optional.of(cursor));
@@ -68,7 +73,8 @@ class EventFeedPollerTest {
     }
 
     private EventFeedPoller poller(boolean enabled) {
-        return new EventFeedPoller(backend, shipments, cursors, processed, transactions, CLOCK,
+        return new EventFeedPoller(backend, shipments, stockRestores, stockReadiness, cursors, processed, transactions,
+                CLOCK,
                 com.awesome.warehouse.correlation.TracingSupport.disabled(), enabled);
     }
 
@@ -295,5 +301,63 @@ class EventFeedPollerTest {
 
         verify(backend, times(EventFeedPoller.MAX_PAGES_PER_RUN)).events(anyLong(), anyInt(), any());
         assertThat(cursor.getLastSequence()).isEqualTo(20);
+    }
+
+    @Test
+    void theFeedIsNotReadBeforeTheStockLedgerIsInitialised() {
+        when(stockReadiness.isReady()).thenReturn(false);
+
+        assertThat(poller(true).poll()).isZero();
+
+        verify(backend, never()).events(anyLong(), anyInt(), any());
+        verify(cursors, never()).existsById(any());
+    }
+
+    @Test
+    void aCancellationRestoresStockBeforeTheShipmentIsFollowed() {
+        FeedEvent cancelled = event(1, "order.cancelled", 42L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(cancelled), 1, false));
+
+        assertThat(poller(true).poll()).isEqualTo(1);
+
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(stockRestores, shipments);
+        order.verify(stockRestores).restore(cancelled);
+        order.verify(shipments).followOrderCancellation(42L);
+        assertThat(cursor.getLastSequence()).isEqualTo(1);
+    }
+
+    @Test
+    void aTransientRestoreFailureStopsTheRunBeforeTheEventIsRecorded() {
+        FeedEvent cancelled = event(1, "order.cancelled", 42L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(cancelled), 1, false));
+        when(stockRestores.restore(cancelled)).thenThrow(new org.springframework.dao.QueryTimeoutException("slow"));
+
+        assertThat(poller(true).poll()).isZero();
+
+        verify(shipments, never()).followOrderCancellation(anyLong());
+        assertThat(stored).isEmpty();
+        assertThat(cursor.getLastSequence()).isZero();
+    }
+
+    @Test
+    void aMalformedStockRestoreIsLoggedAndTheEventStillHandled() {
+        FeedEvent cancelled = event(1, "order.cancelled", 42L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(cancelled), 1, false));
+        when(stockRestores.restore(cancelled)).thenThrow(new IllegalArgumentException("bad stockRestore"));
+
+        assertThat(poller(true).poll()).isEqualTo(1);
+
+        verify(shipments).followOrderCancellation(42L);
+        assertThat(stored).containsExactly(cancelled.id());
+    }
+
+    @Test
+    void otherEventTypesAreNotOfferedToTheStockRestore() {
+        FeedEvent paid = event(1, "order.paid", 42L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(paid), 1, false));
+
+        poller(true).poll();
+
+        verify(stockRestores, never()).restore(any());
     }
 }

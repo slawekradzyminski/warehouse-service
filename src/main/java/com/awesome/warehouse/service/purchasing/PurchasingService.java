@@ -2,9 +2,6 @@ package com.awesome.warehouse.service.purchasing;
 
 import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.InternalProductDto;
-import com.awesome.warehouse.client.InventoryReceiptRequest;
-import com.awesome.warehouse.client.ReceiptLine;
-import com.awesome.warehouse.client.ReceiptType;
 import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.dto.purchasing.PurchaseOrderDto;
 import com.awesome.warehouse.dto.purchasing.PurchaseOrderLineDto;
@@ -20,9 +17,11 @@ import com.awesome.warehouse.entity.purchasing.PurchaseOrderLineEntity;
 import com.awesome.warehouse.entity.purchasing.PurchaseOrderStatus;
 import com.awesome.warehouse.entity.purchasing.PurchaseReceiptEntity;
 import com.awesome.warehouse.entity.purchasing.SupplierEntity;
+import com.awesome.warehouse.entity.stock.InventoryMovementType;
 import com.awesome.warehouse.repository.purchasing.PurchaseOrderRepository;
 import com.awesome.warehouse.repository.purchasing.PurchaseReceiptRepository;
 import com.awesome.warehouse.repository.purchasing.SupplierRepository;
+import com.awesome.warehouse.service.stock.StockLedger;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -64,6 +63,7 @@ public class PurchasingService {
     private final PurchaseOrderRepository purchaseOrderRepository;
     private final PurchaseReceiptRepository receiptRepository;
     private final BackendClient backendClient;
+    private final StockLedger stockLedger;
     private final Clock warehouseClock;
 
     @Transactional(readOnly = true)
@@ -151,8 +151,9 @@ public class PurchasingService {
 
     /**
      * Books received goods. The purchase order row is locked, the receipt is
-     * validated locally, the backend raises stock (idempotent per requestId)
-     * and only then the received quantities and the receipt are stored.
+     * validated, and in the same transaction the stock ledger records one
+     * PURCHASE_RECEIVED movement per product and the received quantities and
+     * the receipt are stored.
      */
     @Transactional
     public PurchaseOrderDto receive(Long id, ReceiptRequestDto request, String actor) {
@@ -189,10 +190,8 @@ public class PurchasingService {
                         + " exceeds the outstanding quantity of " + line.outstandingQuantity(), HttpStatus.CONFLICT);
             }
         }
-        backendClient.receiveInventory(new InventoryReceiptRequest(
-                backendRequestId(purchaseOrder.getId(), request.getRequestId()), ReceiptType.PURCHASE_RECEIVED, null,
-                "Purchase order #" + purchaseOrder.getId(),
-                quantities.entrySet().stream().map(e -> new ReceiptLine(e.getKey(), e.getValue())).toList()));
+        stockLedger.receive(quantities, InventoryMovementType.PURCHASE_RECEIVED, null,
+                "Purchase order #" + purchaseOrder.getId(), ledgerRequestId(purchaseOrder.getId(), request.getRequestId()));
         quantities.forEach((productId, quantity) -> {
             PurchaseOrderLineEntity line = lines.get(productId);
             line.setReceivedQuantity(line.getReceivedQuantity() + quantity);
@@ -212,12 +211,12 @@ public class PurchasingService {
     }
 
     /**
-     * The backend treats receipt requestIds as globally unique, while clients
-     * only need them unique per purchase order. Deriving the backend id from
-     * both keeps a reused client requestId on another purchase order from
-     * being replayed as the earlier receipt.
+     * The request id of the receipt's ledger movements. Clients only need
+     * requestIds unique per purchase order; deriving the ledger id from both
+     * (as the backend receipts did) keeps a reused client requestId on another
+     * purchase order distinct.
      */
-    static UUID backendRequestId(Long purchaseOrderId, UUID requestId) {
+    static UUID ledgerRequestId(Long purchaseOrderId, UUID requestId) {
         return UUID.nameUUIDFromBytes(("purchase-order-" + purchaseOrderId + "-" + requestId)
                 .getBytes(StandardCharsets.UTF_8));
     }
