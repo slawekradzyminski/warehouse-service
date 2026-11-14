@@ -15,6 +15,7 @@ POSTGRES_IMAGE="postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e9
 RUN_ID="warehouse-smoke-$$"
 NETWORK="$RUN_ID"
 PORT="${SMOKE_PORT:-14003}"
+TRACING="${SMOKE_TRACING:-false}"
 
 cleanup() {
   status=$?
@@ -50,12 +51,19 @@ cat > "$WORK/www/cgi-bin/events" <<'FEED'
 echo "$HTTP_X_REQUEST_ID $HTTP_TRACEPARENT" >> /tmp/feed-headers
 printf 'Content-Type: application/json\r\n\r\n'
 case "$QUERY_STRING" in
-  after=0\&*) printf '%s' '{"events":[{"sequence":1,"id":"8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11","type":"order.cancelled","occurredAt":"2026-11-11T09:30:15.123Z","orderId":999999,"username":"smoke","data":{"orderId":999999,"status":"CANCELLED","totalAmount":10.00,"failureCode":null},"requestId":"smoke-feed-request","traceId":"0af7651916cd43dd8448eb211c80319c"}],"nextCursor":1,"hasMore":false}' ;;
+  after=0\&*) printf '%s' '{"events":[{"sequence":1,"id":"8e0d5f8c-6b7a-4f43-9c1e-5a7d2b9e0c11","type":"order.cancelled","occurredAt":"2026-11-11T09:30:15.123Z","orderId":999999,"username":"smoke","data":{"orderId":999999,"status":"CANCELLED","totalAmount":10.00,"failureCode":null},"requestId":"smoke-feed-request","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"b7ad6b7169203331"}],"nextCursor":1,"hasMore":false}' ;;
   *) printf '%s' '{"events":[],"nextCursor":1,"hasMore":false}' ;;
 esac
 FEED
 chmod 755 "$WORK/www/cgi-bin/events"
-printf '.json:application/json\nP:/internal/v1/events:http://127.0.0.1:4001/cgi-bin/events\n' > "$WORK/httpd.conf"
+# OTLP HTTP receiver: appends every export request body to /tmp/traces (an empty body is a valid response).
+cat > "$WORK/www/cgi-bin/traces" <<'TRACES'
+#!/bin/sh
+head -c "${CONTENT_LENGTH:-0}" >> /tmp/traces
+printf 'Content-Type: application/x-protobuf\r\n\r\n'
+TRACES
+chmod 755 "$WORK/www/cgi-bin/traces"
+printf '.json:application/json\nP:/internal/v1/events:http://127.0.0.1:4001/cgi-bin/events\nP:/v1/traces:http://127.0.0.1:4001/cgi-bin/traces\n' > "$WORK/httpd.conf"
 chmod -R a+rX "$WORK/www" "$WORK/httpd.conf"
 
 token() {
@@ -102,6 +110,8 @@ docker run -d --name "$RUN_ID-app" --network "$NETWORK" --memory 160m -p "$PORT:
   -e BACKEND_BASE_URL="http://$RUN_ID-jwks:4001" \
   -e WAREHOUSE_EVENTS_POLL_INTERVAL=PT1S \
   -e LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs \
+  -e TRACING_ENABLED="$TRACING" \
+  -e TRACING_OTLP_ENDPOINT="http://$RUN_ID-jwks:4001/v1/traces" \
   "$IMAGE" >/dev/null
 
 base="http://localhost:$PORT"
@@ -113,6 +123,10 @@ expect "health" "$(status_of "$base/actuator/health")" 200
 echo "ready after $(( $(date +%s) - started ))s"
 
 expect "prometheus metrics" "$(status_of "$base/actuator/prometheus")" 200
+metrics=$(curl -sf "$base/actuator/prometheus")
+grep -q '^warehouse_outbox_pending 0.0$' <<< "$metrics" && grep -q '^warehouse_outbox_failed_total 0.0$' <<< "$metrics" \
+  && echo "PASS outbox metrics (pending gauge query, failed counter)" \
+  || { echo "FAIL outbox metrics missing: $(grep warehouse_outbox <<< "$metrics")" >&2; exit 1; }
 curl -sf "$base/v3/api-docs" | grep -q '"/api/v1/warehouse/queue"' && echo "PASS OpenAPI lists warehouse paths"
 curl -sf -H 'Host: awesome.byst.re' -H 'X-Forwarded-Host: awesome.byst.re' -H 'X-Forwarded-Proto: https' \
   -H 'X-Forwarded-Port: 443' "$base/v3/api-docs" | grep -q '"url":"https://awesome.byst.re"' \
@@ -146,7 +160,10 @@ generated=$(header_of X-Request-Id -H 'X-Request-Id: not valid!' "$base/actuator
 [[ "$generated" =~ ^[0-9a-f-]{36}$ ]] && echo "PASS invalid X-Request-Id is replaced ($generated)" \
   || { echo "FAIL invalid X-Request-Id came back as '$generated'" >&2; exit 1; }
 feed_headers=$(docker exec "$RUN_ID-jwks" tail -n 1 /tmp/feed-headers)
-[[ "$feed_headers" =~ ^[0-9a-f-]{36}\ 00-[0-9a-f]{32}-[0-9a-f]{16}-01$ ]] \
+# Tracing off: the hand-built child traceparent (sampled). Tracing on: the instrumented client's
+# span inside the poll run, which is deliberately not recorded (flags 00).
+[[ "$TRACING" == true ]] && feed_flags=00 || feed_flags=01
+[[ "$feed_headers" =~ ^[0-9a-f-]{36}\ 00-[0-9a-f]{32}-[0-9a-f]{16}-$feed_flags$ ]] \
   && echo "PASS feed requests send X-Request-Id and traceparent ($feed_headers)" \
   || { echo "FAIL feed request headers: '$feed_headers'" >&2; exit 1; }
 event_log=$(docker logs "$RUN_ID-app" 2>&1 | grep '"requestId":"smoke-feed-request"' | grep 'Handled event' | head -n 1)
@@ -154,6 +171,25 @@ grep -q '"traceId":"0af7651916cd43dd8448eb211c80319c"' <<< "$event_log" && grep 
   && echo "PASS ECS JSON log of the feed event carries its requestId, traceId and spanId" \
   || { echo "FAIL no ECS log line with the event's correlation ids" >&2; exit 1; }
 echo "$event_log"
+
+if [[ "$TRACING" == true ]]; then
+  expect "traced request" "$(status_of -H 'traceparent: 00-0af7651916cd43dd8448eb211c80319d-b7ad6b7169203332-01' "$base/actuator/health")" 200
+  # The batch span processor exports every 5 seconds; protobuf keeps strings readable.
+  for _ in $(seq 1 30); do
+    exported=$(docker exec "$RUN_ID-jwks" sh -c 'cat /tmp/traces 2>/dev/null' | tr -c '[:print:]' ' ')
+    grep -q 'process order.cancelled' <<< "$exported" && grep -q 'http get /actuator/health' <<< "$exported" && break
+    sleep 1
+  done
+  grep -q 'warehouse-service' <<< "$exported" && grep -q 'process order.cancelled' <<< "$exported" \
+    && grep -q 'http get /actuator/health' <<< "$exported" \
+    && echo "PASS OTLP HTTP export of the consumer and server spans (service warehouse-service)" \
+    || { echo "FAIL no OTLP export with the expected spans" >&2; exit 1; }
+else
+  sleep 6
+  [[ -z "$(docker exec "$RUN_ID-jwks" sh -c 'cat /tmp/traces 2>/dev/null')" ]] \
+    && echo "PASS tracing off: nothing exported" \
+    || { echo "FAIL tracing off exported spans" >&2; exit 1; }
+fi
 
 docker stats --no-stream --format 'memory: {{.MemUsage}}' "$RUN_ID-app"
 echo "native smoke test passed"

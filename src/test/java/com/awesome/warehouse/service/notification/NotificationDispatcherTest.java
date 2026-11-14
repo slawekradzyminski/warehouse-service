@@ -2,8 +2,10 @@ package com.awesome.warehouse.service.notification;
 
 import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.NotificationTemplate;
+import com.awesome.warehouse.correlation.TracingSupport;
 import com.awesome.warehouse.entity.notification.NotificationOutboxEntity;
 import com.awesome.warehouse.repository.notification.NotificationOutboxRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -38,13 +40,15 @@ class NotificationDispatcherTest {
     private final BackendClient backend = mock(BackendClient.class);
     private final PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
     private final List<Map<String, String>> sentUnder = new ArrayList<>();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
 
     private NotificationDispatcher dispatcher(boolean retryEnabled, NotificationOutboxEntity... rows) {
         when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
         when(repository.findDue(any(), anyInt(), any())).thenReturn(List.of(rows));
         when(repository.findById(any())).thenReturn(Optional.empty());
         doAnswer(invocation -> sentUnder.add(MDC.getCopyOfContextMap())).when(backend).sendNotification(any());
-        return new NotificationDispatcher(repository, backend, transactions, CLOCK, retryEnabled);
+        return new NotificationDispatcher(repository, backend, transactions, CLOCK, TracingSupport.disabled(),
+                new OutboxMetrics(meters, repository), retryEnabled);
     }
 
     private static NotificationOutboxEntity row(long id, String correlationId, String traceparent) {
@@ -88,5 +92,33 @@ class NotificationDispatcherTest {
         dispatcher(false, row(1, "req-1", null)).retryDue();
 
         verify(backend, never()).sendNotification(any());
+    }
+
+    @Test
+    void rowsGivenUpAreCountedOnceButRowsStillRetriedAreNot() {
+        NotificationOutboxEntity gone = row(1, "req-1", null);
+        NotificationOutboxEntity lastTry = row(2, "req-2", null);
+        lastTry.setAttempts(NotificationDispatcher.MAX_ATTEMPTS - 1);
+        NotificationOutboxEntity retried = row(3, "req-3", null);
+        NotificationDispatcher dispatcher = dispatcher(true, gone, lastTry, retried);
+        when(repository.findById(any())).thenAnswer(invocation -> Optional.of(
+                List.of(gone, lastTry, retried).get(invocation.<Long>getArgument(0).intValue() - 1)));
+        doAnswer(invocation -> {
+            throw new com.awesome.warehouse.controller.exception.CustomException("User not found",
+                    org.springframework.http.HttpStatus.NOT_FOUND);
+        }).doAnswer(invocation -> {
+            throw new com.awesome.warehouse.controller.exception.CustomException("Backend unavailable",
+                    org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE);
+        }).doAnswer(invocation -> {
+            throw new com.awesome.warehouse.controller.exception.CustomException("Backend unavailable",
+                    org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE);
+        }).when(backend).sendNotification(any());
+
+        assertThat(dispatcher.dispatchDue()).isZero();
+
+        assertThat(gone.getAttempts()).isEqualTo(NotificationDispatcher.MAX_ATTEMPTS);
+        assertThat(lastTry.getAttempts()).isEqualTo(NotificationDispatcher.MAX_ATTEMPTS);
+        assertThat(retried.getAttempts()).isEqualTo(1);
+        assertThat(meters.get(OutboxMetrics.FAILED).counter().count()).isEqualTo(2.0);
     }
 }

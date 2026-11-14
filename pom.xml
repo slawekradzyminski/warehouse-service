@@ -78,6 +78,36 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
+        <!--
+          Tracing: Micrometer Tracing over the OpenTelemetry bridge with the OTLP HTTP exporter.
+          These are the tracing parts of spring-boot-starter-opentelemetry without its OTLP metrics
+          registry (metrics stay on the Prometheus scrape). The exporter sends with the JDK HTTP
+          client instead of OkHttp, which keeps OkHttp and the Kotlin runtime out of the native image.
+          Compiled in always; TRACING_ENABLED switches it on at runtime (see TracingConfig).
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-micrometer-tracing-opentelemetry</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-otel</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>io.opentelemetry</groupId>
+                    <artifactId>opentelemetry-exporter-sender-okhttp</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-sender-jdk</artifactId>
+        </dependency>
+
         <!-- JWT validation; same library and version as the backend that issues the tokens -->
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
@@ -136,6 +166,16 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-restclient-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          In-memory span exporter for TracingFlowTest. spring-boot-micrometer-tracing-test is left out on
+          purpose: it turns tracing export (and so the W3C propagator) off in every test context, while
+          production always has them and switches tracing with warehouse.tracing.enabled.
+        -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-testing</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

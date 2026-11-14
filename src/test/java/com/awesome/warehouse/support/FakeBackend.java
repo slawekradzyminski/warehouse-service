@@ -174,7 +174,7 @@ public class FakeBackend implements BackendClient {
     /** Appends the event with the next sequence (the given sequence is ignored). */
     public FeedEvent publish(FeedEvent event) {
         FeedEvent stored = new FeedEvent(sequences.incrementAndGet(), event.id(), event.type(), event.occurredAt(),
-                event.orderId(), event.username(), event.data(), event.requestId(), event.traceId());
+                event.orderId(), event.username(), event.data(), event.requestId(), event.traceId(), event.spanId());
         feed.add(stored);
         return stored;
     }
