@@ -4,6 +4,7 @@ import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.correlation.CorrelationInterceptor;
 import com.awesome.warehouse.dto.order.PageDto;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.util.StreamUtils;
@@ -12,6 +13,8 @@ import org.springframework.web.client.RestClientException;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -138,13 +141,42 @@ public class RestBackendClient implements BackendClient {
     }
 
     @Override
-    public InventoryReceiptResponse receiveInventory(InventoryReceiptRequest request) {
+    public StockLevelsResponse pushStockLevels(StockLevelsRequest request) {
         return call(() -> restClient.post()
-                .uri("/internal/v1/inventory/receipts")
+                .uri("/internal/v1/inventory/levels")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(request)
                 .retrieve()
-                .body(InventoryReceiptResponse.class));
+                .body(StockLevelsResponse.class));
+    }
+
+    @Override
+    public InventoryExportPage exportInventory(Long afterProductId, int limit) {
+        return call(() -> restClient.get()
+                .uri(uri -> {
+                    uri.path("/internal/v1/inventory/export");
+                    if (afterProductId != null) {
+                        uri.queryParam("afterProductId", afterProductId);
+                    }
+                    return uri.queryParam("limit", limit).build();
+                })
+                .retrieve()
+                .body(InventoryExportPage.class));
+    }
+
+    @Override
+    public Optional<Long> orderIdByReservation(UUID reservationId) {
+        try {
+            return Optional.ofNullable(call(() -> restClient.get()
+                    .uri("/internal/v1/orders/by-reservation/{id}", reservationId)
+                    .retrieve()
+                    .body(OrderReference.class)).orderId());
+        } catch (CustomException e) {
+            if (e.getHttpStatus() == HttpStatus.NOT_FOUND) {
+                return Optional.empty();
+            }
+            throw e;
+        }
     }
 
     @Override

@@ -19,6 +19,11 @@ documentation, code comments, test names, commit messages and handoff notes.
   Backend 4xx keep status and message; unavailability is 503 "Backend unavailable".
 - `RestBackendClientContractTest` pins the internal-API requests. Change it only
   together with the contract document and the backend.
+- The stock ledger (`/internal/v1/stock`, warehouse is the owner) follows
+  `awesome-localstack/docs/INVENTORY_OWNERSHIP_CONTRACT.md`; only the backend calls
+  it, with `BACKEND_SERVICE_TOKEN`. Every ledger change goes through `StockLedger`
+  (locks in product id order, one movement, `ledgerVersion` + 1, a level in
+  `stock_level_outbox`).
 
 # Verification Commands
 
@@ -54,7 +59,8 @@ in-memory `FakeBackend`, which implements the contract's internal-API rules.
 - PITest: run the profile above after normal verification when you
   change the shipment state machine, allocation (`ShipmentAllocator`), the
   aggregate mirror (`FulfilmentAggregate`), returns, refunds, purchasing receipts, the
-  JWT validator or filter, or the backend client error mapping. Narrow it for
+  JWT validator or filter, the backend client error mapping, or the stock ledger
+  (`StockService`, `StockLedger`, `ReservationReaper`, `StockRestoreConsumer`). Narrow it for
   small changes, for example
   `./mvnw -Pmutation-testing test-compile pitest:mutationCoverage -DtargetClasses=com.awesome.warehouse.service.returns.ReturnService -DtargetTests=com.awesome.warehouse.service.returns.ReturnServiceTest`.
 - Treat `NO_COVERAGE` as a reachability gap and `SURVIVED` as an assertion gap.
@@ -71,4 +77,4 @@ in-memory `FakeBackend`, which implements the contract's internal-API rules.
 
 # Native smoke test
 
-- `docker build -t warehouse-service:native . && scripts/native-smoke.sh warehouse-service:native` boots the native binary against a real Postgres (under a 160 MiB limit) and checks migrations, demo seeding, JWT validation, a JPA write, event feed consumption (cursor and processed event), correlation ids (X-Request-Id echo, outbound headers, ECS JSON log fields), health, metrics and OpenAPI. Run it after dependency bumps and entity changes: JVM tests cannot see missing native metadata or lazy-proxy limits. CI runs it on every push and pull request.
+- `docker build -t warehouse-service:native . && scripts/native-smoke.sh warehouse-service:native` boots the native binary against a real Postgres (under a 160 MiB limit) and checks migrations, demo seeding, JWT validation, a JPA write, event feed consumption (cursor and processed event), the stock ledger (import from a stubbed backend export, service-token auth, reserve/confirm/adjust/items, feed restore, level push, reaper, metrics), correlation ids (X-Request-Id echo, outbound headers, ECS JSON log fields), health, metrics and OpenAPI. Run it after dependency bumps and entity changes: JVM tests cannot see missing native metadata or lazy-proxy limits. CI runs it on every push and pull request.

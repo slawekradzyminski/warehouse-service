@@ -2,9 +2,6 @@ package com.awesome.warehouse.service.purchasing;
 
 import com.awesome.warehouse.client.BackendClient;
 import com.awesome.warehouse.client.InternalProductDto;
-import com.awesome.warehouse.client.InventoryReceiptRequest;
-import com.awesome.warehouse.client.ReceiptLine;
-import com.awesome.warehouse.client.ReceiptType;
 import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.dto.purchasing.PurchaseOrderDto;
 import com.awesome.warehouse.dto.purchasing.PurchaseOrderLineRequestDto;
@@ -17,9 +14,11 @@ import com.awesome.warehouse.entity.purchasing.PurchaseOrderLineEntity;
 import com.awesome.warehouse.entity.purchasing.PurchaseOrderStatus;
 import com.awesome.warehouse.entity.purchasing.PurchaseReceiptEntity;
 import com.awesome.warehouse.entity.purchasing.SupplierEntity;
+import com.awesome.warehouse.entity.stock.InventoryMovementType;
 import com.awesome.warehouse.repository.purchasing.PurchaseOrderRepository;
 import com.awesome.warehouse.repository.purchasing.PurchaseReceiptRepository;
 import com.awesome.warehouse.repository.purchasing.SupplierRepository;
+import com.awesome.warehouse.service.stock.StockLedger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -45,6 +44,8 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -60,6 +61,7 @@ class PurchasingServiceTest {
     @Mock private PurchaseOrderRepository purchaseOrderRepository;
     @Mock private PurchaseReceiptRepository receiptRepository;
     @Mock private BackendClient backendClient;
+    @Mock private StockLedger stockLedger;
 
     private PurchasingService service;
     private PurchaseOrderEntity purchaseOrder;
@@ -68,7 +70,7 @@ class PurchasingServiceTest {
     @BeforeEach
     void setUp() {
         service = new PurchasingService(supplierRepository, purchaseOrderRepository, receiptRepository, backendClient,
-                Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC));
+                stockLedger, Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC));
         supplier = SupplierEntity.builder().id(1L).name("Nordic").leadTimeDays(7).build();
         purchaseOrder = PurchaseOrderEntity.builder().id(9L).supplier(supplier).status(PurchaseOrderStatus.SUBMITTED)
                 .lines(new ArrayList<>()).build();
@@ -91,11 +93,8 @@ class PurchasingServiceTest {
     void partialReceiptBooksStockThenStoresQuantitiesAndReceipt() {
         PurchaseOrderDto dto = service.receive(9L, receipt(REQUEST, new ReceiptLineDto(3L, 4)), "admin");
 
-        ArgumentCaptor<InventoryReceiptRequest> booked = ArgumentCaptor.forClass(InventoryReceiptRequest.class);
-        verify(backendClient).receiveInventory(booked.capture());
-        assertThat(booked.getValue()).isEqualTo(new InventoryReceiptRequest(
-                PurchasingService.backendRequestId(9L, REQUEST), ReceiptType.PURCHASE_RECEIVED, null,
-                "Purchase order #9", List.of(new ReceiptLine(3L, 4))));
+        verify(stockLedger).receive(Map.of(3L, 4), InventoryMovementType.PURCHASE_RECEIVED, null,
+                "Purchase order #9", PurchasingService.ledgerRequestId(9L, REQUEST));
         assertThat(dto.getStatus()).isEqualTo(PurchaseOrderStatus.PARTIALLY_RECEIVED);
         assertThat(dto.getLines().getFirst().getReceivedQuantity()).isEqualTo(4);
         assertThat(dto.getLines().getFirst().getOutstandingQuantity()).isEqualTo(6);
@@ -126,7 +125,7 @@ class PurchasingServiceTest {
                 });
         assertThatThrownBy(() -> service.receive(9L, receipt(REQUEST, new ReceiptLineDto(4L, 1)), "admin"))
                 .hasMessage("Receiving 1 units of product 4 exceeds the outstanding quantity of 0");
-        verify(backendClient, never()).receiveInventory(any());
+        verify(stockLedger, never()).receive(anyMap(), any(), any(), any(), any());
         assertThat(purchaseOrder.getLines().getFirst().getReceivedQuantity()).isZero();
     }
 
@@ -140,7 +139,7 @@ class PurchasingServiceTest {
         PurchaseOrderDto dto = service.receive(9L, receipt(REQUEST, new ReceiptLineDto(3L, 4)), "admin");
 
         assertThat(dto.getStatus()).isEqualTo(PurchaseOrderStatus.RECEIVED);
-        verify(backendClient, never()).receiveInventory(any());
+        verify(stockLedger, never()).receive(anyMap(), any(), any(), any(), any());
         verify(receiptRepository, never()).save(any());
     }
 
@@ -155,7 +154,7 @@ class PurchasingServiceTest {
                     assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.CONFLICT);
                     assertThat(e.getMessage()).isEqualTo("requestId already used with different lines");
                 });
-        verify(backendClient, never()).receiveInventory(any());
+        verify(stockLedger, never()).receive(anyMap(), any(), any(), any(), any());
     }
 
     @Test
@@ -191,11 +190,11 @@ class PurchasingServiceTest {
 
     @Test
     void failedStockBookingLeavesQuantitiesAndReceiptsUntouched() {
-        when(backendClient.receiveInventory(any()))
-                .thenThrow(new CustomException("Backend unavailable", HttpStatus.SERVICE_UNAVAILABLE));
+        doThrow(new CustomException("Stock ledger not initialised", HttpStatus.SERVICE_UNAVAILABLE))
+                .when(stockLedger).receive(anyMap(), any(), any(), any(), any());
 
         assertThatThrownBy(() -> service.receive(9L, receipt(REQUEST, new ReceiptLineDto(3L, 4)), "admin"))
-                .hasMessage("Backend unavailable");
+                .hasMessage("Stock ledger not initialised");
         assertThat(purchaseOrder.getLines().getFirst().getReceivedQuantity()).isZero();
         assertThat(purchaseOrder.getStatus()).isEqualTo(PurchaseOrderStatus.SUBMITTED);
         verify(receiptRepository, never()).save(any());
@@ -334,11 +333,11 @@ class PurchasingServiceTest {
     }
 
     @Test
-    void backendReceiptIdsAreScopedToThePurchaseOrder() {
+    void ledgerReceiptIdsAreScopedToThePurchaseOrder() {
         UUID clientId = UUID.randomUUID();
 
-        assertThat(PurchasingService.backendRequestId(1L, clientId)).isEqualTo(PurchasingService.backendRequestId(1L, clientId));
-        assertThat(PurchasingService.backendRequestId(1L, clientId)).isNotEqualTo(PurchasingService.backendRequestId(2L, clientId));
-        assertThat(PurchasingService.backendRequestId(1L, clientId)).isNotEqualTo(clientId);
+        assertThat(PurchasingService.ledgerRequestId(1L, clientId)).isEqualTo(PurchasingService.ledgerRequestId(1L, clientId));
+        assertThat(PurchasingService.ledgerRequestId(1L, clientId)).isNotEqualTo(PurchasingService.ledgerRequestId(2L, clientId));
+        assertThat(PurchasingService.ledgerRequestId(1L, clientId)).isNotEqualTo(clientId);
     }
 }

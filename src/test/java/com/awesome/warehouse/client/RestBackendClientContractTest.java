@@ -295,30 +295,69 @@ class RestBackendClientContractTest {
     }
 
     @Test
-    void purchaseReceiptOmitsOrderIdAndReturnRestockCarriesIt() {
-        UUID requestId = UUID.fromString("2f1c8a8e-3b0e-4d39-9d43-0a6d6f7f0a11");
-        server.expect(requestTo(BASE + "/internal/v1/inventory/receipts"))
+    void stockLevelsArePostedToTheProjection() {
+        server.expect(requestTo(BASE + "/internal/v1/inventory/levels"))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(header("X-Service-Token", TOKEN))
                 .andExpect(content().json("""
-                        {"requestId":"2f1c8a8e-3b0e-4d39-9d43-0a6d6f7f0a11","type":"PURCHASE_RECEIVED",
-                         "reference":"Purchase order #9","lines":[{"productId":3,"quantity":4}]}""",
+                        {"levels":[{"productId":1,"quantity":8,"ledgerVersion":42},
+                                   {"productId":3,"quantity":0,"ledgerVersion":7}]}""",
                         org.springframework.test.json.JsonCompareMode.STRICT))
-                .andRespond(withSuccess("{\"movementIds\":[11,12]}", MediaType.APPLICATION_JSON));
-        server.expect(requestTo(BASE + "/internal/v1/inventory/receipts"))
-                .andExpect(content().json("""
-                        {"requestId":"2f1c8a8e-3b0e-4d39-9d43-0a6d6f7f0a11","type":"RETURN_RESTOCKED","orderId":42,
-                         "reference":"Return #5","lines":[{"productId":3,"quantity":1}]}""",
-                        org.springframework.test.json.JsonCompareMode.STRICT))
-                .andRespond(withSuccess("{\"movementIds\":[]}", MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess("{\"applied\":1,\"ignored\":1}", MediaType.APPLICATION_JSON));
 
-        InventoryReceiptResponse purchase = client.receiveInventory(new InventoryReceiptRequest(requestId,
-                ReceiptType.PURCHASE_RECEIVED, null, "Purchase order #9", List.of(new ReceiptLine(3L, 4))));
-        client.receiveInventory(new InventoryReceiptRequest(requestId, ReceiptType.RETURN_RESTOCKED, 42L, "Return #5",
-                List.of(new ReceiptLine(3L, 1))));
+        StockLevelsResponse response = client.pushStockLevels(new StockLevelsRequest(List.of(
+                new StockLevel(1L, 8, 42), new StockLevel(3L, 0, 7))));
 
         server.verify();
-        assertThat(purchase.movementIds()).containsExactly(11L, 12L);
+        assertThat(response).isEqualTo(new StockLevelsResponse(1, 1));
+    }
+
+    @Test
+    void inventoryExportIsReadPageByPage() {
+        server.expect(requestTo(BASE + "/internal/v1/inventory/export?limit=500"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header("X-Service-Token", TOKEN))
+                .andRespond(withSuccess("""
+                        {"items":[{"productId":1,"quantity":10,
+                          "movements":[{"id":5,"orderId":null,"type":"INITIAL_STOCK","delta":10,"quantityAfter":10,
+                                        "actor":"admin","reason":"Initial stock","requestId":null,
+                                        "createdAt":"2026-11-14T10:00:00.123456"}]}],
+                         "nextAfterProductId":1}""", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/internal/v1/inventory/export?afterProductId=1&limit=500"))
+                .andRespond(withSuccess("{\"items\":[],\"nextAfterProductId\":null}", MediaType.APPLICATION_JSON));
+
+        InventoryExportPage first = client.exportInventory(null, 500);
+        InventoryExportPage last = client.exportInventory(1L, 500);
+
+        server.verify();
+        assertThat(first.nextAfterProductId()).isEqualTo(1L);
+        assertThat(first.items()).singleElement().satisfies(item -> {
+            assertThat(item.quantity()).isEqualTo(10);
+            assertThat(item.movements()).singleElement().isEqualTo(new ExportedMovement(5L, null,
+                    com.awesome.warehouse.entity.stock.InventoryMovementType.INITIAL_STOCK, 10, 10, "admin",
+                    "Initial stock", null, java.time.LocalDateTime.parse("2026-11-14T10:00:00.123456")));
+        });
+        assertThat(last.items()).isEmpty();
+        assertThat(last.nextAfterProductId()).isNull();
+    }
+
+    @Test
+    void orderByReservationIsEmptyOn404AndUnavailableOn5xx() {
+        UUID reservationId = UUID.fromString("2f1c8a8e-3b0e-4d39-9d43-0a6d6f7f0a11");
+        String path = BASE + "/internal/v1/orders/by-reservation/" + reservationId;
+        server.expect(requestTo(path)).andExpect(method(HttpMethod.GET))
+                .andExpect(header("X-Service-Token", TOKEN))
+                .andRespond(withSuccess("{\"orderId\":123}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(path)).andRespond(withStatus(HttpStatus.NOT_FOUND)
+                .contentType(MediaType.APPLICATION_JSON).body("{\"message\":\"Order not found\"}"));
+        server.expect(requestTo(path)).andRespond(withStatus(HttpStatus.BAD_GATEWAY));
+
+        assertThat(client.orderIdByReservation(reservationId)).contains(123L);
+        assertThat(client.orderIdByReservation(reservationId)).isEmpty();
+        assertThatThrownBy(() -> client.orderIdByReservation(reservationId))
+                .isInstanceOfSatisfying(CustomException.class,
+                        e -> assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+        server.verify();
     }
 
     @Test

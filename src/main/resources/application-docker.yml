@@ -12,3 +12,5 @@ backend:
 warehouse:
   # Required: the backend disables its internal API when the token is unset.
   service-token: ${WAREHOUSE_SERVICE_TOKEN}
+  # Required: the backend authenticates its stock commands with this token.
+  backend-service-token: ${BACKEND_SERVICE_TOKEN}

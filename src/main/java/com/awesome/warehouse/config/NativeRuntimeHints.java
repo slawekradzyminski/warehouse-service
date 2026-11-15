@@ -1,15 +1,20 @@
 package com.awesome.warehouse.config;
 
 import com.awesome.warehouse.client.EventFeedPage;
+import com.awesome.warehouse.client.ExportedMovement;
+import com.awesome.warehouse.client.ExportedStockItem;
 import com.awesome.warehouse.client.FeedEvent;
 import com.awesome.warehouse.client.FulfilmentUpdateRequest;
 import com.awesome.warehouse.client.InternalOrderDto;
 import com.awesome.warehouse.client.InternalProductDto;
-import com.awesome.warehouse.client.InventoryReceiptRequest;
-import com.awesome.warehouse.client.InventoryReceiptResponse;
+import com.awesome.warehouse.client.InventoryExportPage;
 import com.awesome.warehouse.client.NotificationRequest;
+import com.awesome.warehouse.client.OrderReference;
 import com.awesome.warehouse.client.OrderRefundRequest;
 import com.awesome.warehouse.client.JwkSet;
+import com.awesome.warehouse.client.StockLevel;
+import com.awesome.warehouse.client.StockLevelsRequest;
+import com.awesome.warehouse.client.StockLevelsResponse;
 import com.awesome.warehouse.dto.ErrorDto;
 import com.awesome.warehouse.dto.fulfilment.ReallocateShipmentDto;
 import com.awesome.warehouse.dto.fulfilment.ReconciliationDto;
@@ -19,6 +24,18 @@ import com.awesome.warehouse.dto.fulfilment.ShortPickDto;
 import com.awesome.warehouse.dto.fulfilment.UpdateLocationDto;
 import com.awesome.warehouse.dto.fulfilment.WarehouseLocationDto;
 import com.awesome.warehouse.dto.order.PageDto;
+import com.awesome.warehouse.dto.stock.ConfirmReservationRequestDto;
+import com.awesome.warehouse.dto.stock.InitialStockRequestDto;
+import com.awesome.warehouse.dto.stock.InventoryMovementDto;
+import com.awesome.warehouse.dto.stock.ReleasedReservationDto;
+import com.awesome.warehouse.dto.stock.ReservationDto;
+import com.awesome.warehouse.dto.stock.ReserveStockRequestDto;
+import com.awesome.warehouse.dto.stock.ReservedLineDto;
+import com.awesome.warehouse.dto.stock.StockAdjustmentDto;
+import com.awesome.warehouse.dto.stock.StockAdjustmentRequestDto;
+import com.awesome.warehouse.dto.stock.StockErrorDto;
+import com.awesome.warehouse.dto.stock.StockItemDto;
+import com.awesome.warehouse.dto.stock.StockLineDto;
 import org.springframework.aot.hint.MemberCategory;
 import org.springframework.aot.hint.RuntimeHints;
 import org.springframework.aot.hint.RuntimeHintsRegistrar;
@@ -35,7 +52,9 @@ import java.util.List;
  *
  * <ul>
  *   <li>Internal-API records are (de)serialised by Jackson through {@code RestClient},
- *       which AOT cannot infer from controller signatures. The parcel and location DTOs
+ *       which AOT cannot infer from controller signatures. The stock ledger API's records
+ *       (bodies of {@code /internal/v1/stock}, list elements and the error body written by the
+ *       exception handler) are listed as well. The parcel and location DTOs
  *       are listed too: nested and list element types ({@code ShipmentDto.lines},
  *       {@code ReconciliationDto.Parcel}) are bound without relying on inference.</li>
  *   <li>JJWT's API module instantiates its implementation classes by name
@@ -56,8 +75,13 @@ import java.util.List;
     InternalOrderDto.class,
     InternalProductDto.class,
     FulfilmentUpdateRequest.class,
-    InventoryReceiptRequest.class,
-    InventoryReceiptResponse.class,
+    StockLevel.class,
+    StockLevelsRequest.class,
+    StockLevelsResponse.class,
+    InventoryExportPage.class,
+    ExportedStockItem.class,
+    ExportedMovement.class,
+    OrderReference.class,
     NotificationRequest.class,
     OrderRefundRequest.class,
     JwkSet.class,
@@ -73,7 +97,19 @@ import java.util.List;
     ReallocateShipmentDto.class,
     ShortPickDto.class,
     ReconciliationDto.class,
-    ReconciliationDto.Parcel.class
+    ReconciliationDto.Parcel.class,
+    ReserveStockRequestDto.class,
+    StockLineDto.class,
+    ReservationDto.class,
+    ReservedLineDto.class,
+    ConfirmReservationRequestDto.class,
+    ReleasedReservationDto.class,
+    StockAdjustmentRequestDto.class,
+    StockAdjustmentDto.class,
+    InitialStockRequestDto.class,
+    StockItemDto.class,
+    InventoryMovementDto.class,
+    StockErrorDto.class
 })
 public class NativeRuntimeHints {
 

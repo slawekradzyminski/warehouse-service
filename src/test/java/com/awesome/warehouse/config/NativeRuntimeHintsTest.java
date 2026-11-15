@@ -42,4 +42,31 @@ class NativeRuntimeHintsTest {
         assertThat(RuntimeHintsPredicates.resource()
                 .forResource("db/migration/V6__warehouse_locations_and_parcels.sql")).accepts(hints);
     }
+
+    @Test
+    void stockLedgerTypesAreRegisteredForJsonBinding() {
+        assertThat(NativeRuntimeHints.class.getAnnotation(RegisterReflectionForBinding.class).value()).contains(
+                com.awesome.warehouse.client.StockLevel.class,
+                com.awesome.warehouse.client.StockLevelsRequest.class,
+                com.awesome.warehouse.client.StockLevelsResponse.class,
+                com.awesome.warehouse.client.InventoryExportPage.class,
+                com.awesome.warehouse.client.ExportedStockItem.class,
+                com.awesome.warehouse.client.ExportedMovement.class,
+                com.awesome.warehouse.client.OrderReference.class,
+                com.awesome.warehouse.dto.stock.ReserveStockRequestDto.class,
+                com.awesome.warehouse.dto.stock.StockLineDto.class,
+                com.awesome.warehouse.dto.stock.ReservationDto.class,
+                com.awesome.warehouse.dto.stock.ReservedLineDto.class,
+                com.awesome.warehouse.dto.stock.ConfirmReservationRequestDto.class,
+                com.awesome.warehouse.dto.stock.ReleasedReservationDto.class,
+                com.awesome.warehouse.dto.stock.StockAdjustmentRequestDto.class,
+                com.awesome.warehouse.dto.stock.StockAdjustmentDto.class,
+                com.awesome.warehouse.dto.stock.InitialStockRequestDto.class,
+                com.awesome.warehouse.dto.stock.StockItemDto.class,
+                com.awesome.warehouse.dto.stock.InventoryMovementDto.class,
+                com.awesome.warehouse.dto.stock.StockErrorDto.class);
+        RuntimeHints hints = new RuntimeHints();
+        new NativeRuntimeHints.Registrar().registerHints(hints, getClass().getClassLoader());
+        assertThat(RuntimeHintsPredicates.resource().forResource("db/migration/V7__stock_ledger.sql")).accepts(hints);
+    }
 }

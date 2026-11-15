@@ -209,6 +209,8 @@ class MultiWarehouseFlowTest extends AbstractFlowTest {
         transition(parcels.get(1).getId(), "pick", null);
 
         ShipmentDto cancelled = transition(parcels.get(0).getId(), "cancel", null).as(ShipmentDto.class);
+        poller.poll();
+        awaitStockPush();
 
         assertThat(cancelled.getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
         assertThat(shipmentRepository.findByOrderIdOrderByIdAsc(order.id()))

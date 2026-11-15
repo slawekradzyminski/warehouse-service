@@ -48,6 +48,22 @@ backend:
 
 warehouse:
   service-token: ${WAREHOUSE_SERVICE_TOKEN:local-warehouse-token}
+  # Expected from the backend on the stock ledger API (/internal/v1/stock, sent as
+  # "Authorization: Bearer <token>"). Unset, that API answers 404; required in Docker.
+  backend-service-token: ${BACKEND_SERVICE_TOKEN:}
+  # The stock ledger (owner of stock quantities and movements since 1.6.0).
+  stock:
+    # On startup, an empty ledger is imported from the backend (GET /internal/v1/inventory/export);
+    # the stock API answers 503 until the import is done.
+    import-enabled: ${WAREHOUSE_STOCK_IMPORT_ENABLED:true}
+    # Levels the backend projection did not accept are pushed again at this interval.
+    push-retry-enabled: ${WAREHOUSE_STOCK_PUSH_RETRY_ENABLED:true}
+    push-retry-interval: ${WAREHOUSE_STOCK_PUSH_RETRY_INTERVAL:PT5S}
+    # Reservations still unconfirmed after the timeout are confirmed (when the backend has an
+    # order for them) or released, checked at the reaper interval.
+    reaper-enabled: ${WAREHOUSE_RESERVATION_REAPER_ENABLED:true}
+    reservation-confirm-timeout: ${WAREHOUSE_RESERVATION_CONFIRM_TIMEOUT:PT2M}
+    reservation-reaper-interval: ${WAREHOUSE_RESERVATION_REAPER_INTERVAL:PT30S}
   # Demo suppliers and the demo location split (Gdansk ships Books, Home & Kitchen and
   # Wearables); enabled by the local and demo profiles.
   seed-demo-data: false
@@ -94,6 +110,18 @@ management:
     health:
       probes:
         enabled: true
+      # stockLedger reports IMPORTING during the startup ledger import: ordered after UP here, so
+      # /actuator/health (the container healthcheck) stays 200 while the stock API answers 503,
+      # and ordered first in the readiness group, which then answers 503.
+      status:
+        order: DOWN,OUT_OF_SERVICE,UP,IMPORTING,UNKNOWN
+      group:
+        readiness:
+          include: readinessState,stockLedger
+          status:
+            order: DOWN,OUT_OF_SERVICE,IMPORTING,UP,UNKNOWN
+            http-mapping:
+              IMPORTING: 503
   # Tracing beans are always built (Spring AOT fixes bean conditions at image build time);
   # warehouse.tracing.enabled decides at runtime whether anything is sampled and exported.
   tracing:

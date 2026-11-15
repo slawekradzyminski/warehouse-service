@@ -29,16 +29,18 @@ import java.util.Set;
  *       parent-based with {@code TRACING_SAMPLING_PROBABILITY} for new traces while it is on;</li>
  *   <li>Micrometer's MDC listener is silenced: {@code CorrelationFilter}, the jobs and the event
  *       feed own the {@code traceId}/{@code spanId} MDC keys (see {@code TracingSupport});</li>
- *   <li>the runs of the event feed poll and of the notification retry are not traced as root
- *       spans (they would add an empty trace every few seconds); the event and notification
- *       spans they start have their own parents and are recorded.</li>
+ *   <li>the runs of the event feed poll, the notification retry, the stock level push retry and
+ *       the reservation reaper are not traced as root spans (they would add an empty trace every
+ *       few seconds); the event, notification, push and reap spans they start have their own
+ *       parents and are recorded.</li>
  * </ul>
  */
 @Configuration(proxyBeanMethods = false)
 public class TracingConfig {
 
     /** Scheduled methods ({@code SimpleClassName.method}) whose runs do not start a recorded trace. */
-    static final Set<String> UNTRACED_RUNS = Set.of("EventFeedPoller.scheduledPoll", "NotificationDispatcher.retryDue");
+    static final Set<String> UNTRACED_RUNS = Set.of("EventFeedPoller.scheduledPoll", "NotificationDispatcher.retryDue",
+            "StockLevelDispatcher.retryDue", "ReservationReaper.scheduledReap");
 
     @Bean
     Sampler warehouseSampler(@Value("${warehouse.tracing.enabled:false}") boolean enabled,

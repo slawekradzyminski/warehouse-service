@@ -5,10 +5,7 @@ import com.awesome.warehouse.client.OrderRefundRequest;
 import com.awesome.warehouse.client.FulfilmentState;
 import com.awesome.warehouse.client.InternalOrderDto;
 import com.awesome.warehouse.client.InternalOrderItemDto;
-import com.awesome.warehouse.client.InventoryReceiptRequest;
 import com.awesome.warehouse.client.NotificationRequest;
-import com.awesome.warehouse.client.ReceiptLine;
-import com.awesome.warehouse.client.ReceiptType;
 import com.awesome.warehouse.controller.exception.CustomException;
 import com.awesome.warehouse.dto.order.OrderStatus;
 import com.awesome.warehouse.dto.returns.CreateReturnDto;
@@ -21,6 +18,8 @@ import com.awesome.warehouse.entity.returns.ReturnItemEntity;
 import com.awesome.warehouse.entity.returns.ReturnReason;
 import com.awesome.warehouse.entity.returns.ReturnRequestEntity;
 import com.awesome.warehouse.entity.returns.ReturnStatus;
+import com.awesome.warehouse.entity.stock.InventoryMovementType;
+import com.awesome.warehouse.service.stock.StockLedger;
 import com.awesome.warehouse.repository.fulfilment.ShipmentRepository;
 import com.awesome.warehouse.repository.returns.ReturnRequestRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,13 +41,16 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -65,13 +67,14 @@ class ReturnServiceTest {
     @Mock private BackendClient backendClient;
     @Mock private NotificationOutbox notificationOutbox;
     @Mock private OrderLocks orderLocks;
+    @Mock private StockLedger stockLedger;
 
     private ReturnService service;
 
     @BeforeEach
     void setUp() {
         service = new ReturnService(returnRepository, shipmentRepository, backendClient, orderLocks, notificationOutbox,
-                Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC));
+                stockLedger, Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC));
         lenient().when(returnRepository.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
         lenient().when(orderLocks.callLocked(anyLong(), any()))
                 .thenAnswer(invocation -> invocation.<java.util.function.Supplier<?>>getArgument(1).get());
@@ -219,14 +222,8 @@ class ReturnServiceTest {
         assertThat(dto.getStatus()).isEqualTo(ReturnStatus.RECEIVED);
         assertThat(dto.getItems()).extracting(i -> i.getCondition())
                 .containsExactly(ItemCondition.DAMAGED, ItemCondition.RESELLABLE);
-        ArgumentCaptor<InventoryReceiptRequest> receipt = ArgumentCaptor.forClass(InventoryReceiptRequest.class);
-        verify(backendClient).receiveInventory(receipt.capture());
-        assertThat(receipt.getValue().requestId())
-                .isEqualTo(UUID.nameUUIDFromBytes("return-5".getBytes(StandardCharsets.UTF_8)));
-        assertThat(receipt.getValue().type()).isEqualTo(ReceiptType.RETURN_RESTOCKED);
-        assertThat(receipt.getValue().orderId()).isEqualTo(42L);
-        assertThat(receipt.getValue().reference()).isEqualTo("Return #5");
-        assertThat(receipt.getValue().lines()).containsExactly(new ReceiptLine(1L, 1));
+        verify(stockLedger).receive(Map.of(1L, 1), InventoryMovementType.RETURN_RESTOCKED, 42L, "Return #5",
+                UUID.nameUUIDFromBytes("return-5".getBytes(StandardCharsets.UTF_8)));
         assertThat(request.getStatus()).isEqualTo(ReturnStatus.RECEIVED);
         assertThat(request.getReceivedAt()).isEqualTo(NOW);
         assertThat(request.getItems()).extracting(ReturnItemEntity::getCondition)
@@ -241,29 +238,30 @@ class ReturnServiceTest {
         service.receive(5L, List.of(new ReceiveItemDto(2L, ItemCondition.RESELLABLE),
                 new ReceiveItemDto(1L, ItemCondition.RESELLABLE)), "admin");
 
-        ArgumentCaptor<InventoryReceiptRequest> receipt = ArgumentCaptor.forClass(InventoryReceiptRequest.class);
-        verify(backendClient).receiveInventory(receipt.capture());
-        assertThat(receipt.getValue().lines()).containsExactly(new ReceiptLine(1L, 1), new ReceiptLine(2L, 1));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<Long, Integer>> restock = ArgumentCaptor.forClass(Map.class);
+        verify(stockLedger).receive(restock.capture(), any(), any(), any(), any());
+        assertThat(restock.getValue()).containsExactly(Map.entry(1L, 1), Map.entry(2L, 1));
     }
 
     @Test
-    void receiveWithoutResellableItemsDoesNotCallTheBackend() {
+    void receiveWithoutResellableItemsBooksNoStock() {
         existing(ReturnStatus.APPROVED);
 
         service.receive(5L, List.of(new ReceiveItemDto(1L, ItemCondition.DAMAGED),
                 new ReceiveItemDto(2L, ItemCondition.DAMAGED)), "admin");
 
-        verify(backendClient, never()).receiveInventory(any());
+        verify(stockLedger, never()).receive(anyMap(), any(), any(), any(), any());
     }
 
     @Test
     void failedRestockLeavesTheReturnApproved() {
         ReturnRequestEntity request = existing(ReturnStatus.APPROVED);
-        when(backendClient.receiveInventory(any()))
-                .thenThrow(new CustomException("Backend unavailable", HttpStatus.SERVICE_UNAVAILABLE));
+        doThrow(new CustomException("Product 1 not found", HttpStatus.NOT_FOUND))
+                .when(stockLedger).receive(anyMap(), any(), any(), any(), any());
 
         assertThatThrownBy(() -> service.receive(5L, List.of(new ReceiveItemDto(1L, ItemCondition.RESELLABLE),
-                new ReceiveItemDto(2L, ItemCondition.DAMAGED)), "admin")).hasMessage("Backend unavailable");
+                new ReceiveItemDto(2L, ItemCondition.DAMAGED)), "admin")).hasMessage("Product 1 not found");
         assertThat(request.getStatus()).isEqualTo(ReturnStatus.APPROVED);
         assertThat(request.getItems()).extracting(ReturnItemEntity::getCondition).containsOnlyNulls();
         verify(returnRepository, never()).saveAndFlush(any());
@@ -278,7 +276,7 @@ class ReturnServiceTest {
         assertThatThrownBy(() -> service.receive(5L, List.of(new ReceiveItemDto(1L, ItemCondition.RESELLABLE),
                 new ReceiveItemDto(1L, ItemCondition.DAMAGED)), "a"))
                 .hasMessage("Product 1 is listed more than once");
-        verify(backendClient, never()).receiveInventory(any());
+        verify(stockLedger, never()).receive(anyMap(), any(), any(), any(), any());
     }
 
     @Test

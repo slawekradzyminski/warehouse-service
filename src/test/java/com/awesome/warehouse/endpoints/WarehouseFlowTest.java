@@ -26,6 +26,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class WarehouseFlowTest extends AbstractFlowTest {
 
     @org.springframework.beans.factory.annotation.Autowired
+    private com.awesome.warehouse.service.event.EventFeedPoller eventFeedPoller;
+
+    @org.springframework.beans.factory.annotation.Autowired
     private com.awesome.warehouse.service.fulfilment.ShipmentReconciler reconciler;
     @org.springframework.beans.factory.annotation.Autowired
     private com.awesome.warehouse.repository.fulfilment.ShipmentRepository shipmentRepository;
@@ -165,11 +168,15 @@ class WarehouseFlowTest extends AbstractFlowTest {
         ShipmentDto cancelled = transition(pickedShipment.getId(), "cancel", null).as(ShipmentDto.class);
         Response cancelPacked = postJson(WAREHOUSE + "/shipments/" + packedShipment.getId() + "/cancel", null,
                 warehouseToken);
+        // The backend records stock.restore-requested with the cancel; the ledger restores from the feed.
+        eventFeedPoller.poll();
+        awaitStockPush();
 
         assertThat(cancelled.getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
         assertThat(cancelled.getCancelledAt()).isNotNull();
         assertThat(backend.order(picked.id()).status()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(backend.stockOf(product.id())).isEqualTo(12);
+        assertThat(movementsOf(product.id()).getLast().getOrderId()).isEqualTo(picked.id());
         assertThat(cancelPacked.status()).isEqualTo(409);
         assertThat(cancelPacked.message()).isEqualTo("Cannot cancel a shipment in status PACKED");
     }

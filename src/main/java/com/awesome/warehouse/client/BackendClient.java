@@ -4,6 +4,8 @@ import com.awesome.warehouse.dto.order.PageDto;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Backend internal API ({@code /internal/v1}). Implementations translate
@@ -31,7 +33,20 @@ public interface BackendClient {
 
     List<InternalProductDto> getAllProducts();
 
-    InventoryReceiptResponse receiveInventory(InventoryReceiptRequest request);
+    /**
+     * Pushes ledger stock levels to the backend projection ({@code POST /internal/v1/inventory/levels});
+     * the backend ignores levels whose version is not newer than its own.
+     */
+    StockLevelsResponse pushStockLevels(StockLevelsRequest request);
+
+    /**
+     * One page of the backend's former stock ledger for the one-time import
+     * ({@code GET /internal/v1/inventory/export}); {@code afterProductId} null reads the first page.
+     */
+    InventoryExportPage exportInventory(Long afterProductId, int limit);
+
+    /** The order saved for a checkout reservation, or empty when the backend has none (404). */
+    Optional<Long> orderIdByReservation(UUID reservationId);
 
     void sendNotification(NotificationRequest request);
 

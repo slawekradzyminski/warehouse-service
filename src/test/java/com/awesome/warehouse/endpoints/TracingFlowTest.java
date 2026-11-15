@@ -86,6 +86,8 @@ class TracingFlowTest extends AbstractFlowTest {
     @Autowired private ObservationRegistry observations;
     @Autowired private RestClient.Builder restClientBuilder;
     @Autowired private CarrierSimulator carrierSimulator;
+    @Autowired private com.awesome.warehouse.service.stock.ReservationReaper reaper;
+    @Autowired private org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @TestConfiguration(proxyBeanMethods = false)
     static class InMemorySpans {
@@ -279,13 +281,57 @@ class TracingFlowTest extends AbstractFlowTest {
         observeScheduledRun(poller, "scheduledPoll", pollRun);
         AtomicReference<io.micrometer.tracing.Span> retryRun = new AtomicReference<>();
         observeScheduledRun(dispatcher, "retryDue", retryRun);
+        AtomicReference<io.micrometer.tracing.Span> pushRetryRun = new AtomicReference<>();
+        observeScheduledRun(stockLevelDispatcher, "retryDue", pushRetryRun);
+        AtomicReference<io.micrometer.tracing.Span> reaperRun = new AtomicReference<>();
+        observeScheduledRun(reaper, "scheduledReap", reaperRun);
 
         assertThat(carrierRun.get().context().sampled()).isTrue();
         assertThat(carrierRun.get().context().parentId()).isNull();
         assertThat(pollRun.get().context().sampled()).isFalse();
         assertThat(retryRun.get().context().sampled()).isFalse();
+        assertThat(pushRetryRun.get().context().sampled()).isFalse();
+        assertThat(reaperRun.get().context().sampled()).isFalse();
         assertThat(spans.getFinishedSpanItems()).singleElement()
                 .satisfies(span -> assertThat(span.getSpanId()).isEqualTo(carrierRun.get().context().spanId()));
+    }
+
+    @Test
+    void theLevelPushAndTheReaperAreProducerSpansInTheTraceOfTheCheckoutThatReserved() throws Exception {
+        com.awesome.warehouse.client.InternalProductDto phone = backend.product("Phone", "Electronics", "25.00", 10);
+        awaitStockPush();
+        UUID reservationId = UUID.randomUUID();
+        spans.reset();
+
+        MvcResult reserved = mockMvc.perform(post("/internal/v1/stock/reservations")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer test-backend-service-token")
+                .header("X-Request-Id", REQUEST_ID)
+                .header("traceparent", TRACEPARENT)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(jsonMapper.writeValueAsString(Map.of("reservationId", reservationId, "username", "alice",
+                        "lines", List.of(Map.of("productId", phone.id(), "quantity", 2)))))).andReturn();
+        awaitStockPush();
+
+        assertThat(reserved.getResponse().getStatus()).isEqualTo(201);
+        SpanData push = spanNamed("push stock levels");
+        assertThat(push.getKind()).isEqualTo(SpanKind.PRODUCER);
+        assertThat(push.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(ancestorsOf(push.getParentSpanId())).contains(singleServerSpan().getSpanId());
+        assertThat(push.getAttributes().get(AttributeKey.stringKey("stock.levels"))).isEqualTo("1");
+        assertThat(backend.levelPushCalls().getLast().traceId()).isEqualTo(TRACE_ID);
+
+        jdbc.update("update warehouse.stock_reservations set created_at = ? where reservation_id = ?",
+                java.time.LocalDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(3), reservationId);
+        spans.reset();
+        assertThat(reaper.reap()).isEqualTo(1);
+
+        SpanData reap = spanNamed("reap reservation");
+        assertThat(reap.getKind()).isEqualTo(SpanKind.PRODUCER);
+        assertThat(reap.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(reap.getAttributes().get(AttributeKey.stringKey("reservation.id")))
+                .isEqualTo(reservationId.toString());
+        assertThat(backend.correlatedCalls()).contains(
+                new CorrelatedCall("GET order by reservation " + reservationId, REQUEST_ID, TRACE_ID));
     }
 
     private void observeScheduledRun(Object bean, String method, AtomicReference<io.micrometer.tracing.Span> span)

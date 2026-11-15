@@ -97,8 +97,10 @@ class EventFeedFlowTest extends AbstractFlowTest {
 
         int handled = poller.poll();
 
-        assertThat(backend.feed()).hasSize(1);
-        assertThat(handled).isEqualTo(1);
+        // order.cancelled plus the internal stock.restore-requested of the same cancel.
+        assertThat(backend.feed()).extracting(FeedEvent::type)
+                .containsExactly("order.cancelled", "stock.restore-requested");
+        assertThat(handled).isEqualTo(2);
         ShipmentEntity after = shipment(shipment.getId());
         assertThat(after.getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
         assertThat(after.getLastActor()).isEqualTo("warehouse");

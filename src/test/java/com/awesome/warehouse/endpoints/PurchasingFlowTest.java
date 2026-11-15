@@ -1,11 +1,11 @@
 package com.awesome.warehouse.endpoints;
 
 import com.awesome.warehouse.client.InternalProductDto;
-import com.awesome.warehouse.client.ReceiptType;
 import com.awesome.warehouse.dto.purchasing.PurchaseOrderDto;
 import com.awesome.warehouse.dto.purchasing.PurchaseOrderLineRequestDto;
 import com.awesome.warehouse.dto.purchasing.PurchaseOrderRequestDto;
 import com.awesome.warehouse.dto.purchasing.ReceiptLineDto;
+import com.awesome.warehouse.entity.stock.InventoryMovementType;
 import com.awesome.warehouse.dto.purchasing.ReceiptRequestDto;
 import com.awesome.warehouse.dto.purchasing.ReorderSuggestionDto;
 import com.awesome.warehouse.dto.purchasing.SupplierDto;
@@ -51,12 +51,18 @@ class PurchasingFlowTest extends AbstractFlowTest {
                 .isEqualTo("Receiving 7 units of product " + product.id() + " exceeds the outstanding quantity of 6");
         assertThat(complete.getStatus()).isEqualTo(PurchaseOrderStatus.RECEIVED);
         assertThat(complete.getReceivedAt()).isNotNull();
+        awaitStockPush();
         assertThat(backend.stockOf(product.id())).isEqualTo(10);
-        assertThat(backend.receipts()).allSatisfy(receipt -> {
-            assertThat(receipt.type()).isEqualTo(ReceiptType.PURCHASE_RECEIVED);
-            assertThat(receipt.orderId()).isNull();
-            assertThat(receipt.reference()).isEqualTo("Purchase order #" + draft.getId());
-        });
+        assertThat(movementsOf(product.id()))
+                .filteredOn(movement -> movement.getType() == InventoryMovementType.PURCHASE_RECEIVED)
+                .hasSize(2)
+                .allSatisfy(movement -> {
+                    assertThat(movement.getOrderId()).isNull();
+                    assertThat(movement.getActor()).isEqualTo("warehouse-service");
+                    assertThat(movement.getReason()).isEqualTo("Purchase order #" + draft.getId());
+                    assertThat(movement.getRequestId()).isNotNull();
+                })
+                .extracting(movement -> movement.getDelta()).containsExactly(4, 6);
         assertThat(cancelReceived.status()).isEqualTo(409);
     }
 
@@ -73,30 +79,50 @@ class PurchasingFlowTest extends AbstractFlowTest {
 
         assertThat(replay.status()).isEqualTo(200);
         assertThat(replay.as(PurchaseOrderDto.class).getLines().getFirst().getReceivedQuantity()).isEqualTo(3);
+        awaitStockPush();
         assertThat(backend.stockOf(product.id())).isEqualTo(3);
-        assertThat(backend.calls()).filteredOn(call -> call.startsWith("POST receipts")).hasSize(1);
+        assertThat(movementsOf(product.id()))
+                .filteredOn(movement -> movement.getType() == InventoryMovementType.PURCHASE_RECEIVED).hasSize(1);
         assertThat(changed.status()).isEqualTo(409);
         assertThat(changed.message()).isEqualTo("requestId already used with different lines");
     }
 
     @Test
-    void failedStockBookingLeavesThePurchaseOrderUnchanged() {
+    void receiptsAreBookedInTheLocalLedgerWhileTheBackendIsDown() {
         InternalProductDto product = backend.product("Phone", "Electronics", "10.00", 0);
         PurchaseOrderDto draft = createDraft(supplier("Outage Supply", 3), List.of(line(product, 10)));
         postJson(POS + "/" + draft.getId() + "/submit", null, adminToken);
-        UUID requestId = UUID.randomUUID();
+        awaitStockPush();
 
         backend.setAvailable(false);
-        Response failed = receive(draft, requestId, product, 3);
+        Response received = receive(draft, UUID.randomUUID(), product, 3);
+        awaitStockPush();
+        int projectionWhileDown = backend.stockOf(product.id());
         backend.setAvailable(true);
-        PurchaseOrderDto unchanged = getJson(POS + "/" + draft.getId(), adminToken).as(PurchaseOrderDto.class);
-        Response retried = receive(draft, requestId, product, 3);
+        stockLevelDispatcher.dispatchPending();
 
-        assertThat(failed.status()).isEqualTo(503);
+        assertThat(received.status()).isEqualTo(200);
+        assertThat(received.as(PurchaseOrderDto.class).getStatus()).isEqualTo(PurchaseOrderStatus.PARTIALLY_RECEIVED);
+        assertThat(stockItems.findById(product.id()).orElseThrow().getQuantity()).isEqualTo(3);
+        assertThat(projectionWhileDown).isZero();
+        assertThat(backend.stockOf(product.id())).isEqualTo(3);
+        assertThat(stockLevelOutbox.count()).isZero();
+    }
+
+    @Test
+    void receiptOfAProductWithoutStockItemLeavesThePurchaseOrderUnchanged() {
+        InternalProductDto product = backend.product("Phone", "Electronics", "10.00", 0);
+        PurchaseOrderDto draft = createDraft(supplier("Missing Item Supply", 3), List.of(line(product, 10)));
+        postJson(POS + "/" + draft.getId() + "/submit", null, adminToken);
+        stockService.deleteItem(product.id());
+
+        Response failed = receive(draft, UUID.randomUUID(), product, 3);
+        PurchaseOrderDto unchanged = getJson(POS + "/" + draft.getId(), adminToken).as(PurchaseOrderDto.class);
+
+        assertThat(failed.status()).isEqualTo(404);
+        assertThat(failed.message()).isEqualTo("Product " + product.id() + " not found");
         assertThat(unchanged.getStatus()).isEqualTo(PurchaseOrderStatus.SUBMITTED);
         assertThat(unchanged.getLines().getFirst().getReceivedQuantity()).isZero();
-        assertThat(retried.as(PurchaseOrderDto.class).getStatus()).isEqualTo(PurchaseOrderStatus.PARTIALLY_RECEIVED);
-        assertThat(backend.stockOf(product.id())).isEqualTo(3);
     }
 
     @Test

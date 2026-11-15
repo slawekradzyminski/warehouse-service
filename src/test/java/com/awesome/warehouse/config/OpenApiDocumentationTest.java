@@ -55,7 +55,23 @@ class OpenApiDocumentationTest extends AbstractFlowTest {
                 "/api/v1/admin/returns/{id}/refund",
                 "/api/v1/admin/suppliers",
                 "/api/v1/admin/purchase-orders/{id}/receipts",
-                "/api/v1/admin/inventory/reorder-suggestions");
+                "/api/v1/admin/inventory/reorder-suggestions",
+                "/internal/v1/stock/reservations",
+                "/internal/v1/stock/reservations/{reservationId}/confirm",
+                "/internal/v1/stock/reservations/{reservationId}/release",
+                "/internal/v1/stock/adjustments",
+                "/internal/v1/stock/items/{productId}",
+                "/internal/v1/stock/movements");
+        assertThat(root.at("/components/securitySchemes/backendServiceToken/scheme").asString()).isEqualTo("bearer");
+        assertThat(root.at("/paths/~1internal~1v1~1stock~1reservations/post/security/0").propertyNames())
+                .containsExactly("backendServiceToken");
+        assertThat(root.at("/paths/~1internal~1v1~1stock~1reservations/post/responses").propertyNames())
+                .contains("201", "400", "401", "404", "409", "503");
+        assertThat(root.at("/paths/~1internal~1v1~1stock~1items~1{productId}/put/responses").propertyNames())
+                .contains("200", "201", "400", "401", "503");
+        assertThat(root.at("/components/schemas/InventoryMovementDto/properties").propertyNames())
+                .containsExactly("id", "productId", "orderId", "type", "delta", "quantityAfter", "actor", "reason",
+                        "requestId", "createdAt");
         assertThat(root.at("/paths/~1api~1v1~1warehouse~1queue/get/responses/503")).isNotNull();
         assertThat(root.at("/paths/~1api~1v1~1warehouse~1queue/get/responses").has("503")).isTrue();
         assertThat(root.at("/components/schemas/ShipmentDto/properties").propertyNames())
