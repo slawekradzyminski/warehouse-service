@@ -75,7 +75,7 @@ class EventFeedPollerTest {
     private EventFeedPoller poller(boolean enabled) {
         return new EventFeedPoller(backend, shipments, stockRestores, stockReadiness, cursors, processed, transactions,
                 CLOCK,
-                com.awesome.warehouse.correlation.TracingSupport.disabled(), enabled);
+                com.awesome.warehouse.correlation.TracingSupport.disabled(), enabled, "feed");
     }
 
     private static FeedEvent event(long sequence, String type, Long orderId) {
