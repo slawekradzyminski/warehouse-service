@@ -41,10 +41,14 @@ import org.springframework.aot.hint.RuntimeHints;
 import org.springframework.aot.hint.RuntimeHintsRegistrar;
 import org.springframework.aot.hint.TypeReference;
 import org.springframework.aot.hint.annotation.RegisterReflectionForBinding;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.ImportRuntimeHints;
+import org.springframework.core.type.filter.RegexPatternTypeFilter;
 
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * GraalVM native-image hints. Spring AOT evaluates these at build time; the
@@ -142,8 +146,14 @@ public class NativeRuntimeHints {
         /** Id array types Hibernate instantiates reflectively (see the class comment). */
         static final List<Class<?>> ENTITY_ID_ARRAYS = List.of(java.util.UUID[].class, String[].class);
 
+        /** Artemis JMS client types Spring Boot configures through bean-property reflection (as in the backend). */
+        static final List<String> JMS_REFLECTIVE_TYPES = List.of(
+                "org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory",
+                "org.apache.activemq.artemis.jms.client.ActiveMQJMSConnectionFactory");
+
         @Override
         public void registerHints(RuntimeHints hints, ClassLoader classLoader) {
+            registerArtemisClient(hints);
             for (String type : JJWT_REFLECTIVE_TYPES) {
                 hints.reflection().registerType(TypeReference.of(type), MemberCategory.INVOKE_DECLARED_CONSTRUCTORS);
             }
@@ -151,6 +161,37 @@ public class NativeRuntimeHints {
                 hints.reflection().registerType(idArray);
             }
             hints.resources().registerPattern("db/migration/*.sql");
+        }
+
+        /**
+         * The Artemis JMS client of the broker event transport (as in the backend and notification-service):
+         * the connection factory instantiates {@code Calendar[]} reflectively, Spring Boot configures it
+         * through bean-property reflection, and Artemis logger and message-bundle interfaces load their
+         * generated {@code *_impl} classes by name. The rest is in
+         * {@code META-INF/native-image/com.awesome/*-jms/reachability-metadata.json}.
+         */
+        private static void registerArtemisClient(RuntimeHints hints) {
+            hints.reflection().registerType(TypeReference.of("java.util.Calendar[]"),
+                    MemberCategory.INVOKE_PUBLIC_CONSTRUCTORS);
+            for (String type : JMS_REFLECTIVE_TYPES) {
+                hints.reflection().registerType(TypeReference.of(type),
+                        MemberCategory.INVOKE_PUBLIC_METHODS, MemberCategory.INVOKE_PUBLIC_CONSTRUCTORS);
+            }
+            ClassPathScanningCandidateComponentProvider scanner = new ClassPathScanningCandidateComponentProvider(false) {
+                @Override
+                protected boolean isCandidateComponent(
+                        org.springframework.beans.factory.annotation.AnnotatedBeanDefinition definition) {
+                    return true;
+                }
+            };
+            scanner.addIncludeFilter(new RegexPatternTypeFilter(Pattern.compile(".*_impl")));
+            for (BeanDefinition candidate : scanner.findCandidateComponents("org.apache.activemq.artemis")) {
+                String name = candidate.getBeanClassName();
+                if (name != null && name.endsWith("_impl")) {
+                    hints.reflection().registerType(TypeReference.of(name),
+                            MemberCategory.INVOKE_DECLARED_CONSTRUCTORS, MemberCategory.INVOKE_PUBLIC_METHODS);
+                }
+            }
         }
     }
 }
