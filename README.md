@@ -134,6 +134,26 @@ ten pages.
   example one without an `orderId`) is logged with its id and recorded as
   processed, so it never blocks the feed.
 
+### Broker transport (`EVENTS_TRANSPORT=broker`)
+
+The same events can arrive from ActiveMQ Artemis instead of the feed
+(awesome-localstack `docs/EVENT_BROKER_CONTRACT.md`). With
+`warehouse.events.transport=broker` the poller does not run; a
+`DefaultMessageListenerContainer` (`EventBrokerConfig`, always defined because the native image
+fixes the bean graph, started only in broker mode) reads this service's queue
+`<address>::<address>.warehouse-service` (address `EVENTS_BROKER_ADDRESS`, default
+`awesome.commerce.events`). Each message body is one feed event; `EventBrokerListener` parses it
+and hands it to `EventFeedPoller#processDelivered`, which runs the same handlers in one
+transaction (a stock restore first, at most once per order), skips event ids already in `processed_events` and leaves the feed cursor alone
+(switching back to the feed resumes from it).
+
+Every failure (a body that does not parse, a malformed event, a handler or database error)
+rolls the JMS session back: Artemis redelivers the message after 1, 2, 4 and 8 seconds and then
+moves it to `DLQ.<queue>`. Nothing is skipped silently, unlike the feed. A valid `traceparent`
+message property (the backend relay's `publish <type>` span) becomes the parent of the
+`process <type>` span. The broker is not part of `/actuator/health`; the listener reconnects
+every 5 seconds. Like the poller, the listener waits until the stock ledger is initialised.
+
 The feed needs backend 3.16.0 or later. Against an older backend the request
 answers 404, which is logged on every run; the reconciler still cancels
 shipments, only later.
@@ -515,6 +535,9 @@ Demo suppliers (idempotent): "Nordic Electronics" (orders@nordic-electronics.tes
 | `SPRING_PROFILES_ACTIVE` | active profiles | none (Postgres on localhost) |
 | `JWT_JWKS_REFRESH_INTERVAL` | `security.jwt.jwks-refresh-interval` | `10s` (minimum time between JWKS refetches for unknown key ids) |
 | `WAREHOUSE_EVENTS_ENABLED` / `WAREHOUSE_EVENTS_POLL_INTERVAL` | `warehouse.events.enabled` / `.poll-interval` | `true` / `PT5S` |
+| `EVENTS_TRANSPORT` | `warehouse.events.transport` | `feed` (or `broker`: Artemis listener instead of the poller) |
+| `EVENTS_BROKER_ADDRESS` / `EVENTS_BROKER_CONCURRENCY` | `warehouse.events.broker.address` / `.concurrency` | `awesome.commerce.events` / `1` |
+| `SPRING_ARTEMIS_BROKER_URL` / `_USER` / `_PASSWORD` | `spring.artemis.*` | `tcp://activemq:61616` / `admin` / `admin` (used only in broker mode) |
 | `WAREHOUSE_RECONCILE_ENABLED` / `_INTERVAL` | `warehouse.reconcile.*` | `true` / `PT10M` |
 | `WAREHOUSE_NOTIFICATIONS_RETRY_ENABLED` / `_RETRY_INTERVAL` | `warehouse.notifications.*` | `true` / `PT30S` |
 | `WAREHOUSE_CARRIER_ENABLED` / `_STEP_INTERVAL` | `warehouse.carrier.enabled` / `.step-interval` | `true` / `PT2M` (`PT30S` in `local` and `demo`) |

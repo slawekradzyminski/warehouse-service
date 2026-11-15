@@ -11,7 +11,7 @@
 
     <groupId>com.awesome</groupId>
     <artifactId>warehouse-service</artifactId>
-    <version>1.6.0</version>
+    <version>1.7.0</version>
     <packaging>jar</packaging>
 
     <name>warehouse-service</name>
@@ -21,6 +21,8 @@
         <!-- CVE-2026 Jackson fixes: keep each existing release family on its patched BOM (same as the backend). -->
         <jackson-2-bom.version>2.21.8</jackson-2-bom.version>
         <jackson-bom.version>3.1.8</jackson-bom.version>
+        <!-- Same Artemis client as the backend and notification-service (newer than Spring Boot's managed version). -->
+        <artemis.version>2.57.0</artemis.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <java.version>25</java.version>
@@ -72,6 +74,11 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+        <!-- Commerce events over Artemis (EVENTS_TRANSPORT=broker; the client connects only then). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-artemis</artifactId>
         </dependency>
         <dependency>
             <groupId>io.micrometer</groupId>
@@ -166,6 +173,17 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-restclient-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Embedded Artemis broker for the broker transport flow tests only. -->
+        <dependency>
+            <groupId>org.apache.artemis</groupId>
+            <artifactId>artemis-server</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.artemis</groupId>
+            <artifactId>artemis-jms-server</artifactId>
             <scope>test</scope>
         </dependency>
         <!--

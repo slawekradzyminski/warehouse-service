@@ -23,6 +23,18 @@ spring:
     schemas: warehouse
     default-schema: warehouse
     create-schemas: true
+  # Artemis client of the broker transport (warehouse.events.transport=broker); SPRING_ARTEMIS_BROKER_URL,
+  # _USER and _PASSWORD override it. It connects only when the listener starts. The plain connection
+  # factory: Spring's CachingConnectionFactory hands out JDK proxies the native image cannot create, and
+  # the listener container keeps its own connection.
+  jms:
+    cache:
+      enabled: false
+  artemis:
+    mode: native
+    broker-url: tcp://activemq:61616
+    user: admin
+    password: admin
   jmx:
     enabled: false
   main:
@@ -67,11 +79,18 @@ warehouse:
   # Demo suppliers and the demo location split (Gdansk ships Books, Home & Kitchen and
   # Wearables); enabled by the local and demo profiles.
   seed-demo-data: false
-  # Reads the backend's domain event feed (GET /internal/v1/events) and cancels the
-  # shipment of every cancelled order that is still AWAITING_PICK or PICKED.
+  # Receives the backend's commerce events (order.cancelled cancels the shipment of an order that is
+  # still AWAITING_PICK or PICKED, stock.restore-requested restores stock): by polling the event feed
+  # (GET /internal/v1/events, transport feed) or from this service's Artemis queue (transport broker,
+  # docs/EVENT_BROKER_CONTRACT.md in awesome-localstack).
   events:
     enabled: ${WAREHOUSE_EVENTS_ENABLED:true}
+    transport: ${EVENTS_TRANSPORT:feed}
     poll-interval: ${WAREHOUSE_EVENTS_POLL_INTERVAL:PT5S}
+    broker:
+      # Multicast address of the backend's events; this service reads <address>::<address>.warehouse-service.
+      address: ${EVENTS_BROKER_ADDRESS:awesome.commerce.events}
+      concurrency: ${EVENTS_BROKER_CONCURRENCY:1}
   # Safety net behind the event feed: cancels shipments whose order was cancelled on
   # the backend, adopts orders released without a shipment and fills the lines of
   # shipments created before 1.5.0.
@@ -102,6 +121,10 @@ security:
     jwks-refresh-interval: ${JWT_JWKS_REFRESH_INTERVAL:10s}
 
 management:
+  # The broker is optional (feed transport by default), so it is not part of application health.
+  health:
+    jms:
+      enabled: false
   endpoints:
     web:
       exposure:
