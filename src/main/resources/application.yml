@@ -11,6 +11,13 @@ spring:
       maximum-pool-size: 3
       minimum-idle: 1
       idle-timeout: 120000
+      # A request waits at most 5 s for a pooled connection, then answers 503 Database unavailable.
+      # HikariCP's default of 30 s made every request wait 30 s while the database refused
+      # connections. loginTimeout stays at 30 s, so opening a connection over a slow link (the
+      # fault-injection lab's postgres latency) still succeeds in the background.
+      connection-timeout: 5000
+      data-source-properties:
+        loginTimeout: 30
   jpa:
     open-in-view: false
     hibernate:

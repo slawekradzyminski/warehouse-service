@@ -30,6 +30,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -262,6 +263,49 @@ class StockServiceTest {
     }
 
     @Test
+    void releaseOfAnUnknownIdStoresATombstoneThatALateReserveCannotUse() {
+        stock.item(1, 10, 1);
+
+        ReleasedReservationDto released = service.release(RESERVATION);
+
+        assertThat(released).isEqualTo(new ReleasedReservationDto(RESERVATION, ReservationStatus.RELEASED));
+        StockReservationEntity tombstone = stock.reservationRows.get(RESERVATION);
+        assertThat(tombstone.getStatus()).isEqualTo(ReservationStatus.RELEASED);
+        assertThat(tombstone.getLines()).isEmpty();
+        assertThat(tombstone.getUsername()).isEqualTo("system");
+        assertThat(service.release(RESERVATION)).isEqualTo(released);
+        assertThatThrownBy(() -> service.reserve(request(RESERVATION, line(1, 2))))
+                .isInstanceOfSatisfying(StockException.class, e -> {
+                    assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(e.getMessage()).isEqualTo("Reservation already released");
+                });
+        assertThat(stock.itemRows.get(1L).getQuantity()).isEqualTo(10);
+        assertThat(stock.movementRows).isEmpty();
+    }
+
+    @Test
+    void aReserveThatCommitsTheIdFirstTurnsTheTombstoneIntoAConflict() {
+        doThrow(new DataIntegrityViolationException("duplicate key")).when(stock.reservations).saveAndFlush(any());
+
+        assertThatThrownBy(() -> service.release(RESERVATION)).isInstanceOfSatisfying(CustomException.class, e -> {
+            assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(e.getMessage()).isEqualTo("Reservation was created concurrently; release it again");
+        });
+    }
+
+    @Test
+    void aReleasedReservationIsNotReplayedAsHeldStock() {
+        stock.item(1, 10, 1);
+        service.reserve(request(RESERVATION, line(1, 2)));
+        service.release(RESERVATION);
+
+        assertThatThrownBy(() -> service.reserve(request(RESERVATION, line(1, 2))))
+                .isInstanceOfSatisfying(StockException.class,
+                        e -> assertThat(e.getMessage()).isEqualTo("Reservation already released"));
+        assertThat(stock.itemRows.get(1L).getQuantity()).isEqualTo(10);
+    }
+
+    @Test
     void releaseSkipsLinesWhoseItemIsGoneOrWouldOverflow() {
         stock.item(1, 10, 1);
         stock.item(2, 10, 1);
@@ -280,7 +324,7 @@ class StockServiceTest {
     }
 
     @Test
-    void aConfirmedOrUnknownReservationIsNotReleased() {
+    void aConfirmedReservationIsNotReleased() {
         stock.item(1, 10, 1);
         service.reserve(request(RESERVATION, line(1, 2)));
         service.confirm(RESERVATION, 5);
@@ -289,8 +333,6 @@ class StockServiceTest {
             assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.CONFLICT);
             assertThat(e.getMessage()).isEqualTo("Reservation already confirmed");
         });
-        assertThatThrownBy(() -> service.release(UUID.randomUUID())).isInstanceOfSatisfying(CustomException.class,
-                e -> assertThat(e.getHttpStatus()).isEqualTo(HttpStatus.NOT_FOUND));
         assertThat(stock.itemRows.get(1L).getQuantity()).isEqualTo(8);
     }
 
