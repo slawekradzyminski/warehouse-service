@@ -59,6 +59,10 @@ public class StockService {
     static final String SYSTEM_ACTOR = "system";
     static final String RESERVATION_NOT_FOUND = "Reservation not found";
     static final String DIFFERENT_LINES = "reservationId already used with different lines";
+    static final String ALREADY_RELEASED = "Reservation already released";
+    static final String RESERVED_CONCURRENTLY = "Reservation was created concurrently; release it again";
+    /** The username of a release tombstone: no reserve ever arrived to name the buyer. */
+    static final String TOMBSTONE_USER = "system";
     static final int MAX_PAGE_SIZE = 100;
 
     private final StockItemRepository items;
@@ -142,7 +146,7 @@ public class StockService {
         readiness.requireReady();
         StockReservationEntity reservation = lockReservation(reservationId);
         switch (reservation.getStatus()) {
-            case RELEASED -> throw new CustomException("Reservation already released", HttpStatus.CONFLICT);
+            case RELEASED -> throw new CustomException(ALREADY_RELEASED, HttpStatus.CONFLICT);
             case CONFIRMED -> {
                 if (!Objects.equals(reservation.getOrderId(), orderId)) {
                     throw new CustomException("Reservation already confirmed for another order", HttpStatus.CONFLICT);
@@ -156,11 +160,20 @@ public class StockService {
     /**
      * Puts back the stock of a pending reservation (contract 2.3); repeated calls answer the
      * same body, a confirmed reservation is restored only through {@code order.cancelled}.
+     *
+     * <p>An unknown id is stored as a RELEASED tombstone without lines and answers the same 200:
+     * the backend releases a reservation whose reserve call timed out, and that reserve may still
+     * be on its way. When it arrives, it finds the tombstone and deducts nothing.
      */
     @Transactional
     public ReleasedReservationDto release(UUID reservationId) {
         readiness.requireReady();
-        StockReservationEntity reservation = lockReservation(reservationId);
+        Optional<StockReservationEntity> stored = reservations.findForUpdate(reservationId);
+        if (stored.isEmpty()) {
+            storeTombstone(reservationId);
+            return new ReleasedReservationDto(reservationId, ReservationStatus.RELEASED);
+        }
+        StockReservationEntity reservation = stored.get();
         if (reservation.getStatus() == ReservationStatus.CONFIRMED) {
             throw new CustomException("Reservation already confirmed", HttpStatus.CONFLICT);
         }
@@ -168,6 +181,20 @@ public class StockService {
             putBack(reservation, RESERVATION_RELEASED);
         }
         return new ReleasedReservationDto(reservationId, ReservationStatus.RELEASED);
+    }
+
+    private void storeTombstone(UUID reservationId) {
+        StockReservationEntity tombstone = new StockReservationEntity(reservationId, TOMBSTONE_USER, ledger.now());
+        tombstone.setStatus(ReservationStatus.RELEASED);
+        tombstone.setCorrelationId(CorrelationContext.current().map(CorrelationContext::requestId).orElse(null));
+        try {
+            reservations.saveAndFlush(tombstone);
+        } catch (DataIntegrityViolationException e) {
+            // The reserve committed this id meanwhile; the backend's next release (or the reaper) puts it back.
+            throw new CustomException(RESERVED_CONCURRENTLY, HttpStatus.CONFLICT, e);
+        }
+        log.info("Reservation {} released before it was reserved; a late reserve with this id deducts nothing",
+                reservationId);
     }
 
     /**
@@ -290,6 +317,10 @@ public class StockService {
     }
 
     private static ReservationDto replay(StockReservationEntity reservation, Map<Long, Integer> requested) {
+        if (reservation.getStatus() == ReservationStatus.RELEASED) {
+            // Never hand out a released reservation as if it held stock (a tombstone has no lines at all).
+            throw new StockException(ALREADY_RELEASED, HttpStatus.CONFLICT, null);
+        }
         Map<Long, Integer> stored = reservation.getLines().stream().collect(Collectors.toMap(
                 StockReservationLineEntity::getProductId, StockReservationLineEntity::getQuantity, Integer::sum,
                 TreeMap::new));

@@ -228,6 +228,27 @@ class StockApiFlowTest extends AbstractFlowTest {
     // --- 2.3 release ---------------------------------------------------------------------------
 
     @Test
+    void aReleaseThatOvertakesItsReserveLeavesATombstoneSoTheLateReserveDeductsNothing() {
+        InternalProductDto phone = backend.product("Phone", "Electronics", "10.00", 10);
+        UUID timedOut = UUID.randomUUID();
+
+        // The backend gave up on the reserve (read timeout) and released its id; the reserve is still on its way.
+        Response released = call(post(STOCK + "/reservations/" + timedOut + "/release"), SERVICE_TOKEN);
+        Response lateReserve = call(json(post(STOCK + "/reservations"), Map.of("reservationId", timedOut,
+                "username", "client", "lines", List.of(Map.of("productId", phone.id(), "quantity", 2)))),
+                SERVICE_TOKEN);
+        Response confirm = call(json(post(STOCK + "/reservations/" + timedOut + "/confirm"), Map.of("orderId", 1)),
+                SERVICE_TOKEN);
+
+        assertThat(released.status()).isEqualTo(200);
+        assertThat(released.body()).isEqualTo("{\"reservationId\":\"" + timedOut + "\",\"status\":\"RELEASED\"}");
+        assertThat(lateReserve.status()).isEqualTo(409);
+        assertThat(lateReserve.message()).isEqualTo("Reservation already released");
+        assertThat(confirm.status()).isEqualTo(409);
+        assertThat(movementsOf(phone.id())).noneMatch(movement -> timedOut.equals(movement.getReservationId()));
+    }
+
+    @Test
     void releasePutsThePendingStockBackOnceAndRefusesConfirmedReservations() {
         InternalProductDto phone = backend.product("Phone", "Electronics", "10.00", 10);
         UUID pending = reserve(phone, 3);
@@ -246,7 +267,7 @@ class StockApiFlowTest extends AbstractFlowTest {
         assertThat(repeated.body()).isEqualTo(released.body());
         assertThat(ofConfirmed.status()).isEqualTo(409);
         assertThat(ofConfirmed.message()).isEqualTo("Reservation already confirmed");
-        assertThat(unknown.status()).isEqualTo(404);
+        assertThat(unknown.status()).isEqualTo(200);
         assertThat(movementsOf(phone.id()).getLast()).satisfies(movement -> {
             assertThat(movement.getType()).isEqualTo(InventoryMovementType.ORDER_RESTORED);
             assertThat(movement.getDelta()).isEqualTo(3);
