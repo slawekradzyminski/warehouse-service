@@ -2,11 +2,13 @@ package com.awesome.warehouse.controller.exception;
 
 import com.awesome.warehouse.dto.ErrorDto;
 import com.awesome.warehouse.dto.stock.StockErrorDto;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -57,6 +59,19 @@ public class GlobalExceptionHandlerController {
                 .badRequest()
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(errors);
+    }
+
+    /**
+     * The database cannot be reached (no pooled connection within the 5 s connection timeout, or a
+     * refused connection): 503, so callers see a retryable outage instead of a generic 500.
+     */
+    @ExceptionHandler({CannotCreateTransactionException.class, DataAccessResourceFailureException.class,
+            org.hibernate.exception.JDBCConnectionException.class})
+    public ResponseEntity<ErrorDto> handleDatabaseUnavailable(Exception ex) {
+        return ResponseEntity
+                .status(HttpStatus.SERVICE_UNAVAILABLE)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(new ErrorDto(DatabaseUnavailable.MESSAGE));
     }
 
     @ExceptionHandler(AccessDeniedException.class)
