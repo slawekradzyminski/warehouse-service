@@ -74,6 +74,20 @@ public class GlobalExceptionHandlerController {
                 .body(new ErrorDto(DatabaseUnavailable.MESSAGE));
     }
 
+    /**
+     * A JPA or transaction failure whose cause is a dead connection (for example a rollback that
+     * failed after the query lost its pooled connection) is the same outage: 503. Any other
+     * failure keeps the default 500.
+     */
+    @ExceptionHandler({org.springframework.orm.jpa.JpaSystemException.class,
+            org.springframework.transaction.TransactionSystemException.class})
+    public ResponseEntity<ErrorDto> handleJpaSystemException(RuntimeException ex) {
+        if (!DatabaseUnavailable.isCause(ex)) {
+            throw ex;
+        }
+        return handleDatabaseUnavailable(ex);
+    }
+
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ErrorDto> handleAccessDeniedException(AccessDeniedException ex) {
         return ResponseEntity

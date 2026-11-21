@@ -24,4 +24,17 @@ class GlobalExceptionHandlerControllerTest {
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getMessage()).isEqualTo("Database unavailable");
     }
+
+    @Test
+    void answers503ForAFailedRollbackOnADeadConnectionAndRethrowsOtherJpaFailures() {
+        var deadConnection = new org.springframework.orm.jpa.JpaSystemException(new RuntimeException("rollback",
+                new org.hibernate.TransactionException("Unable to rollback against JDBC Connection",
+                        new java.sql.SQLException("Connection is closed"))));
+        var other = new org.springframework.orm.jpa.JpaSystemException(new RuntimeException("mapping bug"));
+
+        assertThat(controller.handleJpaSystemException(deadConnection).getStatusCode())
+                .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> controller.handleJpaSystemException(other))
+                .isSameAs(other);
+    }
 }
