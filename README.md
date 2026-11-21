@@ -245,7 +245,11 @@ unreachable the run stops and the next run retries.
 service reads `GET /internal/v1/inventory/export?afterProductId=&limit=500`
 page by page and stores everything in one transaction. Items get `ledgerVersion`
 1. Movement ids and timestamps are kept, and the identity moves past the largest
-id. Items that already exist are skipped. One level per item is queued, so the
+id. Backend 3.24.0 and later drop their frozen movement table and export
+quantities only (no `movements` list, read as empty), so a fresh database
+starts with one item per product and an empty movement history; deployments
+that imported from 3.22.0 or 3.23.0 keep the history they imported. Items that
+already exist are skipped. One level per item is queued, so the
 projections get version 1. A failed import is retried with backoff (1 s up to
 30 s). Until it succeeds, the stock API answers 503 and the health component
 `stockLedger` reports `IMPORTING`. `/actuator/health/readiness` is then 503.
