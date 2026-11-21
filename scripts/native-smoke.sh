@@ -295,7 +295,11 @@ grep -q '"type":"ADMIN_ADJUSTMENT","delta":4,"quantityAfter":10,' <<< "$adjusted
 expect "create a stock item" "$(stock_status -X PUT -d '{"initialQuantity":3,"actor":"admin"}' "$base/internal/v1/stock/items/502")" 201
 expect "existing stock item" "$(stock_status -X PUT -d '{"initialQuantity":3,"actor":"admin"}' "$base/internal/v1/stock/items/502")" 200
 expect "delete a stock item" "$(stock_status -X DELETE "$base/internal/v1/stock/items/502")" 204
-expect "release of an unknown reservation" "$(stock_status -X POST "$base/internal/v1/stock/reservations/$(new_uuid)/release")" 404
+# A release that overtakes its reserve leaves a RELEASED tombstone; the late reserve deducts nothing.
+tombstone=$(new_uuid)
+expect "release of an unknown reservation (tombstone)" "$(stock_status -X POST "$base/internal/v1/stock/reservations/$tombstone/release")" 200
+late_reserve="{\"reservationId\":\"$tombstone\",\"username\":\"smoke\",\"lines\":[{\"productId\":$PRODUCT,\"quantity\":1}]}"
+expect "late reserve of a released id" "$(stock_status -X POST -d "$late_reserve" "$base/internal/v1/stock/reservations")" 409
 # A reservation that is never confirmed: the reaper asks the backend (404) and releases it.
 orphan=$(new_uuid)
 orphan_body="{\"reservationId\":\"$orphan\",\"username\":\"smoke\",\"lines\":[{\"productId\":$PRODUCT,\"quantity\":1}]}"
