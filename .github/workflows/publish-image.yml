@@ -219,8 +219,10 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.metadata.outputs.labels }}
           outputs: type=image,"name=ghcr.io/${{ github.repository }},slawekradzyminski/warehouse-service",push-by-digest=true,name-canonical=true,push=true
+          # Read-only: ci.yml writes this scope on master pushes, and a tag build that finds the same tree
+          # reuses the compiled layers. Exporting a cache from a tag ref cost 55-107 s per build and was never
+          # read (a tag's cache is invisible to the next tag, and the sources differ anyway).
           cache-from: type=gha,scope=native-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=native-${{ env.PLATFORM_PAIR }}
           sbom: true
           provenance: mode=max
 
