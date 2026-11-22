@@ -640,9 +640,18 @@ Pushing a `vX.Y.Z` tag runs `.github/workflows/publish-image.yml`:
 
 A tag whose tree already passed `ci.yml` publishes in about 14 minutes instead of 20.
 
-The release does not reuse the image from the PR: `ci.yml` builds `warehouse-service:native`
-locally and never pushes it, and the published image carries the release commit in its
-labels and is built on both architectures.
+The release does not reuse an image: `ci.yml` builds `warehouse-service:native` locally and never
+pushes it, and the published image carries the release commit in its labels and is built
+on both architectures. It does reuse compiled layers: on every `master` push `ci.yml`
+writes the BuildKit layer cache (GitHub Actions cache, scopes `native-linux-amd64` and
+`native-linux-arm64`; the `native-arm64` job runs only on pushes and also boots the arm64
+binary), and `publish-image.yml` reads those scopes. When the tagged tree is the tree of
+the `master` push, the native compile layers are cache hits; otherwise (cache evicted after
+7 days without access, or a different tree) the build compiles from scratch as before.
+PR runs read the `master` cache but never write it, so they reuse the dependency layers and,
+for a PR that changes no build input (for example a Dependabot workflow bump), the whole image.
+The publish build only reads the cache: exporting it from a tag ref cost about a minute per
+build and no later run could read it.
 
 ## Mutation testing
 
