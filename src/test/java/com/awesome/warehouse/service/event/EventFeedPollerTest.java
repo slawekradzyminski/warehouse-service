@@ -13,12 +13,21 @@ import com.awesome.warehouse.service.stock.StockReadiness;
 import com.awesome.warehouse.service.stock.StockRestoreConsumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
+import org.springframework.orm.jpa.JpaSystemException;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.TransactionSystemException;
 import org.springframework.http.HttpStatus;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
+import java.sql.SQLTransientConnectionException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -29,6 +38,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.LongStream;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -226,9 +236,9 @@ class EventFeedPollerTest {
     }
 
     @Test
-    void aHandlerFailureIsSkippedAndTheRunContinues() {
+    void aPoisonEventIsSkippedAndTheRunContinues() {
         doAnswer(invocation -> {
-            throw new IllegalStateException("boom");
+            throw new IllegalArgumentException("Event has no orderId");
         }).when(shipments).followOrderCancellation(7L);
         FeedEvent failing = event(1, "order.cancelled", 7L);
         when(backend.events(anyLong(), anyInt(), any()))
@@ -242,13 +252,125 @@ class EventFeedPollerTest {
     }
 
     @Test
+    void droppedConnectionKeepsCursor() {
+        FeedEvent cancelled = event(1, "order.cancelled", 7L);
+        FeedEvent next = event(2, "order.cancelled", 8L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(cancelled, next), 2, false));
+        when(shipments.followOrderCancellation(7L))
+                .thenThrow(new DataAccessResourceFailureException("Unable to acquire JDBC Connection"))
+                .thenReturn(true);
+        EventFeedPoller poller = poller(true);
+
+        assertThat(poller.poll()).isZero();
+
+        assertThat(cursor.getLastSequence()).isZero();
+        assertThat(stored).isEmpty();
+        verify(processed, never()).save(any());
+        verify(shipments, never()).followOrderCancellation(8L);
+
+        assertThat(poller.poll()).isEqualTo(2);
+
+        verify(shipments, times(2)).followOrderCancellation(7L);
+        assertThat(stored).containsExactly(cancelled.id(), next.id());
+        assertThat(cursor.getLastSequence()).isEqualTo(2);
+    }
+
+    @Test
+    void queryTimeoutKeepsCursor() {
+        FeedEvent cancelled = event(1, "order.cancelled", 7L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(cancelled), 1, false));
+        when(shipments.followOrderCancellation(7L)).thenThrow(new QueryTimeoutException("canceling statement due to "
+                + "statement timeout"));
+
+        assertThat(poller(true).poll()).isZero();
+
+        assertThat(cursor.getLastSequence()).isZero();
+        assertThat(stored).isEmpty();
+    }
+
+    static Stream<RuntimeException> infrastructureFailures() {
+        return Stream.of(
+                new DataAccessResourceFailureException("connection reset"),
+                new CannotCreateTransactionException("Could not open JPA EntityManager for transaction"),
+                new CannotGetJdbcConnectionException("Failed to obtain JDBC Connection"),
+                new JpaSystemException(new RuntimeException("connection closed")),
+                new TransactionSystemException("Could not commit JPA transaction"),
+                new QueryTimeoutException("statement timeout"),
+                new IllegalArgumentException("wrapped", new SQLTransientConnectionException("pool exhausted")),
+                new jakarta.persistence.PersistenceException("connection lost"),
+                new CustomException("Database unavailable", HttpStatus.SERVICE_UNAVAILABLE),
+                new IllegalStateException("unexpected"),
+                new ArithmeticException("integer overflow"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("infrastructureFailures")
+    void aFailureOutsideTheEventStopsTheRunWithTheCursorUnchanged(RuntimeException failure) {
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(
+                List.of(event(1, "order.cancelled", 7L), event(2, "order.cancelled", 8L)), 2, false));
+        when(shipments.followOrderCancellation(7L)).thenThrow(failure);
+
+        assertThat(poller(true).poll()).isZero();
+
+        verify(shipments, never()).followOrderCancellation(8L);
+        assertThat(stored).isEmpty();
+        assertThat(cursor.getLastSequence()).isZero();
+    }
+
+    @ParameterizedTest
+    @MethodSource("infrastructureFailures")
+    void aRestoreFailureOutsideTheEventStopsTheRunWithTheCursorUnchanged(RuntimeException failure) {
+        FeedEvent restore = event(1, "stock.restore-requested", 42L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(restore), 1, false));
+        when(stockRestores.restore(restore)).thenThrow(failure).thenReturn(true);
+        EventFeedPoller poller = poller(true);
+
+        assertThat(poller.poll()).isZero();
+
+        assertThat(stored).isEmpty();
+        assertThat(cursor.getLastSequence()).isZero();
+
+        assertThat(poller.poll()).isEqualTo(1);
+
+        assertThat(stored).containsExactly(restore.id());
+        assertThat(cursor.getLastSequence()).isEqualTo(1);
+    }
+
+    static Stream<RuntimeException> poisonFailures() {
+        return Stream.of(
+                new IllegalArgumentException("Event has no orderId"),
+                new NumberFormatException("For input string: \"x\""),
+                new tools.jackson.core.exc.StreamReadException(null, "Unexpected character"),
+                new java.time.format.DateTimeParseException("bad date", "yesterday", 0),
+                new CustomException("Order not found", HttpStatus.NOT_FOUND),
+                new DataIntegrityViolationException("value too long for type character varying(255)"),
+                new org.springframework.dao.DuplicateKeyException("duplicate key value violates unique constraint"),
+                new TransactionSystemException("Could not commit JPA transaction",
+                        new DataIntegrityViolationException("check constraint violated")));
+    }
+
+    @ParameterizedTest
+    @MethodSource("poisonFailures")
+    void aPoisonEventIsStillSkipped(RuntimeException failure) {
+        FeedEvent poison = event(1, "order.cancelled", 7L);
+        FeedEvent next = event(2, "order.cancelled", 8L);
+        when(backend.events(anyLong(), anyInt(), any())).thenReturn(new EventFeedPage(List.of(poison, next), 2, false));
+        when(shipments.followOrderCancellation(7L)).thenThrow(failure);
+
+        assertThat(poller(true).poll()).isEqualTo(1);
+
+        assertThat(stored).containsExactly(poison.id(), next.id());
+        assertThat(cursor.getLastSequence()).isEqualTo(2);
+    }
+
+    @Test
     void whenAFailedEventCannotEvenBeRecordedTheRunStopsBeforeIt() {
         doAnswer(invocation -> {
-            throw new IllegalStateException("database down");
+            throw new IllegalArgumentException("malformed");
         }).when(shipments).followOrderCancellation(7L);
         FeedEvent handled = event(1, "order.cancelled", 6L);
         when(processed.existsById(any())).thenReturn(false);
-        org.mockito.Mockito.doReturn(null).doThrow(new IllegalStateException("database down"))
+        org.mockito.Mockito.doReturn(null).doThrow(new DataAccessResourceFailureException("database down"))
                 .when(processed).save(any());
         when(backend.events(anyLong(), anyInt(), any()))
                 .thenReturn(new EventFeedPage(List.of(handled, event(2, "order.cancelled", 7L),
@@ -265,7 +387,7 @@ class EventFeedPollerTest {
         FeedEvent failing = event(1, "order.cancelled", 7L);
         doAnswer(invocation -> {
             stored.add(failing.id());
-            throw new IllegalStateException("lost a race");
+            throw new IllegalArgumentException("malformed");
         }).when(shipments).followOrderCancellation(7L);
         // nextCursor 0: only the skip itself can move the cursor past the event.
         when(backend.events(anyLong(), anyInt(), any()))

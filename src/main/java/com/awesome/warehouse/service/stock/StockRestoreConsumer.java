@@ -103,6 +103,7 @@ public class StockRestoreConsumer {
     /**
      * Reads the event's data {@code {"orderId":123,"actor":"alice","lines":[{"productId":1,"quantity":2}]}};
      * the event's own {@code orderId} is used when the data has none. Repeated products are summed.
+     * A quantity below 1 or above {@link Integer#MAX_VALUE}, alone or summed, makes the event malformed.
      */
     static StockRestore parse(FeedEvent event) {
         Map<String, Object> data = event.data();
@@ -122,12 +123,23 @@ public class StockRestoreConsumer {
         Map<Long, Integer> quantities = new TreeMap<>();
         for (Object entry : lines) {
             if (!(entry instanceof Map<?, ?> line) || !(line.get("productId") instanceof Number productId)
-                    || !(line.get("quantity") instanceof Number quantity) || quantity.intValue() <= 0) {
+                    || !(line.get("quantity") instanceof Number quantity) || !inIntRange(quantity)) {
                 throw malformed(event, "invalid line " + entry);
             }
-            quantities.merge(productId.longValue(), quantity.intValue(), Math::addExact);
+            long total = (long) quantities.getOrDefault(productId.longValue(), 0) + quantity.intValue();
+            if (total > Integer.MAX_VALUE) {
+                // A poison event, not an arithmetic failure: the poller skips it instead of stalling on it.
+                throw malformed(event, "quantity of product " + productId + " exceeds " + Integer.MAX_VALUE);
+            }
+            quantities.put(productId.longValue(), (int) total);
         }
         return new StockRestore(orderId, actor, quantities);
+    }
+
+    /** A positive quantity that fits an {@code int} (a long or big number is not silently truncated). */
+    private static boolean inIntRange(Number quantity) {
+        double units = quantity.doubleValue();
+        return units >= 1 && units <= Integer.MAX_VALUE;
     }
 
     private static IllegalArgumentException malformed(FeedEvent event, String problem) {

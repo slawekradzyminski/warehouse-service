@@ -130,9 +130,15 @@ ten pages.
   idempotent and several instances never process one event concurrently. After
   a page the cursor moves to `nextCursor` (past events of other types).
 - Backend unavailable or a 4xx from the feed: logged, the run ends and the next
-  one resumes from the stored cursor. An event whose handling fails (for
-  example one without an `orderId`) is logged with its id and recorded as
-  processed, so it never blocks the feed.
+  one resumes from the stored cursor. A poison event, one whose own content
+  cannot be handled (for example one without an `orderId`, or a stock restore
+  with an invalid or out-of-range quantity, or one whose data breaks a database
+  constraint such as a duplicate key), is logged at ERROR with its id and
+  recorded as processed, so it never blocks the feed. Any other database or
+  transaction failure (a dropped connection, a pool or query timeout, a failed
+  commit) ends the run with the cursor unchanged and the next run retries the
+  event; an unexpected failure (a bug) does the same and is logged at ERROR
+  with its stack trace.
 
 ### Broker transport (`EVENTS_TRANSPORT=broker`)
 
