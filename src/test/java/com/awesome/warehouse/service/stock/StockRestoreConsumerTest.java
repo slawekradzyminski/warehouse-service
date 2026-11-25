@@ -164,7 +164,13 @@ class StockRestoreConsumerTest {
                 Map.of("orderId", 42, "actor", "alice", "lines", List.of("x")),
                 Map.of("orderId", 42, "actor", "alice", "lines", List.of(Map.of("productId", "1", "quantity", 1))),
                 Map.of("orderId", 42, "actor", "alice", "lines", List.of(Map.of("productId", 1, "quantity", "1"))),
-                Map.of("orderId", 42, "actor", "alice", "lines", List.of(Map.of("productId", 1, "quantity", 0))));
+                Map.of("orderId", 42, "actor", "alice", "lines", List.of(Map.of("productId", 1, "quantity", 0))),
+                Map.of("orderId", 42, "actor", "alice", "lines",
+                        List.of(Map.of("productId", 1, "quantity", 3_000_000_000L))),
+                Map.of("orderId", 42, "actor", "alice", "lines",
+                        List.of(Map.of("productId", 1, "quantity", 4_294_967_301L))),
+                Map.of("orderId", 42, "actor", "alice", "lines",
+                        List.of(Map.of("productId", 1, "quantity", new java.math.BigInteger("-18446744073709551611")))));
 
         for (Map<String, Object> data : malformed) {
             assertThatThrownBy(() -> StockRestoreConsumer.parse(requested(42L, data)))
@@ -176,5 +182,20 @@ class StockRestoreConsumerTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(StockRestoreConsumer.parse(requested(42L, restore("alice", 1, 1))).quantities())
                 .containsExactly(Map.entry(1L, 1));
+    }
+
+    @Test
+    void quantitiesSummingPastTheIntRangeMakeTheEventMalformedNotAnArithmeticFailure() {
+        Map<String, Object> overflowing = Map.of("orderId", 42, "actor", "alice", "lines", List.of(
+                Map.of("productId", 1, "quantity", Integer.MAX_VALUE),
+                Map.of("productId", 1, "quantity", Integer.MAX_VALUE)));
+
+        assertThatThrownBy(() -> StockRestoreConsumer.parse(requested(42L, overflowing)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("quantity of product 1 exceeds 2147483647");
+        assertThat(StockRestoreConsumer.parse(requested(42L, Map.of("orderId", 42, "actor", "alice", "lines", List.of(
+                Map.of("productId", 1, "quantity", Integer.MAX_VALUE - 1),
+                Map.of("productId", 1, "quantity", 1))))).quantities())
+                .containsExactly(Map.entry(1L, Integer.MAX_VALUE));
     }
 }

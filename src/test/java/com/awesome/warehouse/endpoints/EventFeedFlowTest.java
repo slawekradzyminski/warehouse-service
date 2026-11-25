@@ -20,6 +20,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -212,6 +213,22 @@ class EventFeedFlowTest extends AbstractFlowTest {
         assertThat(poller.cursor()).isEqualTo(2);
         assertThat(shipment(shipment.getId()).getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
         assertThat(poller.poll()).isZero();
+    }
+
+    @Test
+    void aRestoreEventWhoseQuantitiesOverflowIsSkippedInsteadOfStallingTheFeed() {
+        FeedEvent overflowing = backend.publish(new FeedEvent(0, UUID.randomUUID(), "stock.restore-requested",
+                Instant.now(), 999_001L, "client", Map.of("orderId", 999_001, "actor", "alice", "lines", List.of(
+                        Map.of("productId", 1, "quantity", Integer.MAX_VALUE),
+                        Map.of("productId", 1, "quantity", Integer.MAX_VALUE)))));
+        ShipmentDto shipment = releaseToWarehouse(paidOrder().id());
+        backend.cancelByCustomer(shipment.getOrderId());
+
+        poller.poll();
+
+        assertThat(processedEvents.existsById(overflowing.id())).isTrue();
+        assertThat(poller.cursor()).isGreaterThan(overflowing.sequence());
+        assertThat(shipment(shipment.getId()).getStatus()).isEqualTo(ShipmentStatus.CANCELLED);
     }
 
     @Test

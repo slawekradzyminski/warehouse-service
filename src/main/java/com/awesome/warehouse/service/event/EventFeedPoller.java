@@ -37,10 +37,13 @@ import java.util.Map;
  * several instances never handle one event concurrently), skips events already in
  * {@code processed_events}, applies the change, records the event as processed and
  * advances the cursor. A backend outage ends the run; the next tick resumes from the
- * cursor. An event whose handling fails is logged with its id and skipped, so one bad
- * event never blocks the feed. A stock restore runs in its own transaction before the event is
- * recorded as processed; a restore that fails for a transient reason stops the run (the next run
- * retries the event), a malformed restore event is logged and skipped.
+ * cursor. Only a poison event, one whose own content can never be handled
+ * ({@link EventFailures#isPoison}), is logged with its id and skipped, so one bad event never
+ * blocks the feed; any database or transaction failure (a dropped connection, a pool or query
+ * timeout, a failed commit) or other unexpected failure stops the run with the cursor unchanged
+ * and the next run retries the event. A stock restore runs in its own transaction before the event
+ * is recorded as processed and follows the same rule: a malformed restore event is logged and
+ * skipped, any other restore failure stops the run.
  * {@code ShipmentReconciler} remains as a slow safety net.
  *
  * <p>Each scheduled run has its own generated correlation ids; while an event is handled the
@@ -207,17 +210,18 @@ public class EventFeedPoller {
         return process(event);
     }
 
-    /** @return false when the restore failed for a transient reason and the run must stop */
+    /** @return false when the restore failed for a reason other than a poison event and the run must stop */
     private boolean restoreStock(FeedEvent event) {
         try {
             stockRestores.restore(event);
             return true;
-        } catch (IllegalArgumentException e) {
-            log.error("Restore event {} is invalid; its stock is not restored: {}", event.id(), e.getMessage());
-            return true;
         } catch (RuntimeException e) {
+            if (EventFailures.isPoison(e)) {
+                log.error("Restore event {} is invalid; its stock is not restored: {}", event.id(), e.getMessage());
+                return true;
+            }
             log.warn("Stock restore of event {} failed; the run stops and retries it next time: {}", event.id(),
-                    e.getMessage());
+                    String.valueOf(e));
             return false;
         }
     }
@@ -239,9 +243,15 @@ public class EventFeedPoller {
             }
             return outcome;
         } catch (RuntimeException e) {
-            log.error("Event {} ({} #{}) could not be handled and is skipped", event.id(), event.type(),
-                    event.sequence(), e);
-            return skip(event);
+            if (EventFailures.isPoison(e)) {
+                log.error("Event {} ({} #{}) cannot be handled and is skipped", event.id(), event.type(),
+                        event.sequence(), e);
+                return skip(event);
+            }
+            log.warn("Event {} ({} #{}) failed for a reason outside the event (database, transaction or backend); "
+                    + "the run stops and retries it next time: {}", event.id(), event.type(), event.sequence(),
+                    String.valueOf(e));
+            return Outcome.STOPPED;
         }
     }
 
@@ -265,7 +275,7 @@ public class EventFeedPoller {
         throw new IllegalArgumentException("Event " + event.id() + " has no orderId");
     }
 
-    /** Records a failed event as processed so the feed moves on; STOPPED when even that fails. */
+    /** Records a poison event as processed so the feed moves on; STOPPED when even that fails. */
     private Outcome skip(FeedEvent event) {
         try {
             transaction.executeWithoutResult(status -> {
