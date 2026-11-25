@@ -38,7 +38,7 @@ import java.util.Map;
  * {@code processed_events}, applies the change, records the event as processed and
  * advances the cursor. A backend outage ends the run; the next tick resumes from the
  * cursor. Only a poison event, one whose own content can never be handled
- * ({@link EventFailures#isPoison}), is logged with its id and skipped, so one bad event never
+ * ({@link EventFailures#classify}), is logged with its id and skipped, so one bad event never
  * blocks the feed; any database or transaction failure (a dropped connection, a pool or query
  * timeout, a failed commit) or other unexpected failure stops the run with the cursor unchanged
  * and the next run retries the event. A stock restore runs in its own transaction before the event
@@ -216,12 +216,16 @@ public class EventFeedPoller {
             stockRestores.restore(event);
             return true;
         } catch (RuntimeException e) {
-            if (EventFailures.isPoison(e)) {
-                log.error("Restore event {} is invalid; its stock is not restored: {}", event.id(), e.getMessage());
-                return true;
+            switch (EventFailures.classify(e)) {
+                case POISON -> {
+                    log.error("Restore event {} is invalid; its stock is not restored: {}", event.id(), String.valueOf(e));
+                    return true;
+                }
+                case INFRASTRUCTURE -> log.warn("Stock restore of event {} failed; the run stops and retries it next "
+                        + "time: {}", event.id(), String.valueOf(e));
+                case UNEXPECTED -> log.error("Stock restore of event {} failed unexpectedly; the run stops and retries "
+                        + "it next time", event.id(), e);
             }
-            log.warn("Stock restore of event {} failed; the run stops and retries it next time: {}", event.id(),
-                    String.valueOf(e));
             return false;
         }
     }
@@ -243,14 +247,18 @@ public class EventFeedPoller {
             }
             return outcome;
         } catch (RuntimeException e) {
-            if (EventFailures.isPoison(e)) {
-                log.error("Event {} ({} #{}) cannot be handled and is skipped", event.id(), event.type(),
-                        event.sequence(), e);
-                return skip(event);
+            switch (EventFailures.classify(e)) {
+                case POISON -> {
+                    log.error("Event {} ({} #{}) cannot be handled and is skipped", event.id(), event.type(),
+                            event.sequence(), e);
+                    return skip(event);
+                }
+                case INFRASTRUCTURE -> log.warn("Event {} ({} #{}) failed for a reason outside the event (database, "
+                        + "transaction or backend); the run stops and retries it next time: {}", event.id(),
+                        event.type(), event.sequence(), String.valueOf(e));
+                case UNEXPECTED -> log.error("Event {} ({} #{}) failed unexpectedly; the run stops and retries it next "
+                        + "time", event.id(), event.type(), event.sequence(), e);
             }
-            log.warn("Event {} ({} #{}) failed for a reason outside the event (database, transaction or backend); "
-                    + "the run stops and retries it next time: {}", event.id(), event.type(), event.sequence(),
-                    String.valueOf(e));
             return Outcome.STOPPED;
         }
     }

@@ -132,11 +132,13 @@ ten pages.
 - Backend unavailable or a 4xx from the feed: logged, the run ends and the next
   one resumes from the stored cursor. A poison event, one whose own content
   cannot be handled (for example one without an `orderId`, or a stock restore
-  with an invalid or out-of-range quantity), is logged with its id and recorded
-  as processed, so it never blocks the feed. Any database or transaction
-  failure (a dropped connection, a pool or query timeout, a failed commit) or
-  other unexpected failure ends the run with the cursor unchanged, and the next
-  run retries the event.
+  with an invalid or out-of-range quantity, or one whose data breaks a database
+  constraint such as a duplicate key), is logged at ERROR with its id and
+  recorded as processed, so it never blocks the feed. Any other database or
+  transaction failure (a dropped connection, a pool or query timeout, a failed
+  commit) ends the run with the cursor unchanged and the next run retries the
+  event; an unexpected failure (a bug) does the same and is logged at ERROR
+  with its stack trace.
 
 ### Broker transport (`EVENTS_TRANSPORT=broker`)
 
